@@ -1,0 +1,14 @@
+{
+  "name": "liff-danger-backend",
+  "version": "1.0.0",
+  "main": "server.js",
+  "scripts": {
+    "start": "node server.js"
+  },
+  "dependencies": {
+    "@line/bot-sdk": "^7.5.1",
+    "body-parser": "^1.20.2",
+    "express": "^4.18.2",
+    "haversine-distance": "^1.1.1"
+  }
+}
