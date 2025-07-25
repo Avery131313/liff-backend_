@@ -9,7 +9,7 @@ const app = express();
 // ✅ CORS 設定（允許來自 GitHub Pages 等前端）
 app.use(cors({ origin: "*", methods: ["GET", "POST"], allowedHeaders: ["Content-Type"] }));
 
-// ✅ LINE Bot 設定（Render 上設環境變數）
+// ✅ LINE Bot 設定
 const config = {
   channelAccessToken: process.env.CHANNEL_ACCESS_TOKEN,
   channelSecret: process.env.CHANNEL_SECRET
@@ -22,7 +22,6 @@ const dangerZone = {
   lng: 121.45489,
   radius: 500 // 公尺
 };
-
 
 // ✅ 儲存可推播的使用者與上次推播時間
 const pushableUsers = new Map(); // userId => timestamp
@@ -56,15 +55,15 @@ app.post("/webhook", line.middleware(config), async (req, res) => {
             type: "text",
             text: "🛑 你已關閉追蹤功能。"
           });
-        } );
         }
+        // 其他訊息不回覆任何內容（不再提示開關指令）
       }
     }
 
     res.sendStatus(200);
   } catch (err) {
     console.error("❌ webhook 處理錯誤：", err);
-    res.sendStatus(200); // 為避免 webhook 被停用，仍回 200
+    res.sendStatus(200);
   }
 });
 
