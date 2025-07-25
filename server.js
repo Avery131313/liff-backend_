@@ -8,7 +8,9 @@ const app = express();
 
 // ✅ 加入 CORS 允許來自 GitHub Pages
 app.use(cors({
-  origin: "*"
+  origin: "https://avery131313.github.io/liff-gps-tracker/",
+  methods: ["GET", "POST"],
+  allowedHeaders: ["Content-Type"]
 }));
 
 // ✅ LINE Bot 設定
