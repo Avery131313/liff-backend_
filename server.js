@@ -52,7 +52,7 @@ app.post(
 const dangerZone = {
   lat: 25.01845,
   lng: 121.54274,
-  radius: 5, // 公尺
+  radius: 500, // 公尺
 };
 
 // ✅ 處理位置上傳
