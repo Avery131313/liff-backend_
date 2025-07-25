@@ -4,7 +4,6 @@ const line = require("@line/bot-sdk");
 const haversine = require("haversine-distance");
 
 const app = express();
-app.use(bodyParser.json());
 
 // ✅ LINE Bot 設定
 const config = {
@@ -23,8 +22,8 @@ const dangerZone = {
 // ✅ 儲存可推播的使用者與上次推播時間
 const pushableUsers = new Map(); // userId => timestamp(ms)
 
-// ✅ Webhook 接收訊息（管理開啟/關閉追蹤）
-app.post("/webhook", line.middleware(config), async (req, res) => {
+// ✅ Webhook 接收訊息（使用 raw body 才能通過 LINE 驗證）
+app.post("/webhook", bodyParser.raw({ type: "*/*" }), line.middleware(config), async (req, res) => {
   try {
     const events = req.body.events || [];
 
@@ -64,11 +63,14 @@ app.post("/webhook", line.middleware(config), async (req, res) => {
     res.sendStatus(200);
   } catch (err) {
     console.error("❌ webhook 錯誤：", err);
-    res.sendStatus(200); // 即使錯誤也回傳 200，避免 webhook 被停用
+    res.sendStatus(200); // 即使錯誤也回傳 200，避免 LINE 關閉 webhook
   }
 });
 
-// ✅ 接收來自 LIFF 的 GPS 資料
+// ✅ 其他 API 使用 JSON parser（注意順序）
+app.use(bodyParser.json());
+
+// ✅ 接收來自 LIFF 的 GPS 定位資料
 app.post("/location", async (req, res) => {
   const { userId, latitude, longitude } = req.body;
 
@@ -79,7 +81,7 @@ app.post("/location", async (req, res) => {
 
   const userLoc = { lat: latitude, lng: longitude };
   const zoneLoc = { lat: dangerZone.lat, lng: dangerZone.lng };
-  const distance = haversine(userLoc, zoneLoc); // 單位：公尺
+  const distance = haversine(userLoc, zoneLoc); // 公尺
 
   console.log(`📍 ${userId} 距離危險區：${distance.toFixed(2)}m`);
 
