@@ -22,9 +22,9 @@ const client = new line.Client(config);
 
 // ✅ 危險區域設定
 const dangerZone = {
-  lat: 25.01845,
-  lng: 121.54274,
-  radius: 5 // 公尺
+  lat: 25.16835,
+  lng: 121.45489,
+  radius: 500 // 公尺
 };
 
 // ✅ 儲存可推播的使用者與上次推播時間
