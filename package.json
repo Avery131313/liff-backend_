@@ -1,3 +1,5 @@
+npm install cors
+
 {
   "name": "liff-danger-backend",
   "version": "1.0.0",
@@ -12,3 +14,4 @@
     "haversine-distance": "^1.1.1"
   }
 }
+
