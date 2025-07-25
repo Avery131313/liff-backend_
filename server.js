@@ -6,41 +6,36 @@ const haversine = require("haversine-distance");
 
 const app = express();
 
-// ✅ 加入 CORS 允許來自 GitHub Pages
-app.use(cors({
-  origin: "https://avery131313.github.io/liff-gps-tracker/",
-  methods: ["GET", "POST"],
-  allowedHeaders: ["Content-Type"]
-}));
+// ✅ CORS 設定（允許來自 GitHub Pages 等前端）
+app.use(cors({ origin: "*", methods: ["GET", "POST"], allowedHeaders: ["Content-Type"] }));
 
-// ✅ LINE Bot 設定
+// ✅ LINE Bot 設定（Render 上設環境變數）
 const config = {
   channelAccessToken: process.env.CHANNEL_ACCESS_TOKEN,
   channelSecret: process.env.CHANNEL_SECRET
 };
 const client = new line.Client(config);
 
-// ✅ 危險區域設定
+// ✅ 危險區域定義
 const dangerZone = {
   lat: 25.16835,
   lng: 121.45489,
   radius: 500 // 公尺
 };
 
-// ✅ 儲存可推播的使用者與上次推播時間
-const pushableUsers = new Map(); // userId => timestamp(ms)
 
-// ✅ /webhook 使用 raw body (給 LINE 用來驗證簽名)
-app.post("/webhook", bodyParser.raw({ type: "*/*" }), line.middleware(config), async (req, res) => {
+// ✅ 儲存可推播的使用者與上次推播時間
+const pushableUsers = new Map(); // userId => timestamp
+
+// ✅ webhook 處理訊息（啟用 / 關閉 追蹤）
+app.post("/webhook", line.middleware(config), async (req, res) => {
   try {
-    const bodyString = req.body.toString(); // 將 Buffer 轉為字串
-    const body = JSON.parse(bodyString); // 轉回 JSON
-    const events = body.events || [];
+    const events = req.body.events || [];
 
     for (const event of events) {
       if (event.type === "message" && event.message.type === "text") {
-        const text = event.message.text;
         const userId = event.source.userId;
+        const text = event.message.text;
 
         if (text === "開啟追蹤") {
           if (!pushableUsers.has(userId)) {
@@ -64,7 +59,7 @@ app.post("/webhook", bodyParser.raw({ type: "*/*" }), line.middleware(config), a
         } else {
           await client.replyMessage(event.replyToken, {
             type: "text",
-            text: "請輸入「開啟追蹤」或「關閉追蹤」來控制是否接收定位通知。"
+            text: "請輸入「開啟追蹤」或「關閉追蹤」來控制是否接收危險區通知。"
           });
         }
       }
@@ -72,32 +67,31 @@ app.post("/webhook", bodyParser.raw({ type: "*/*" }), line.middleware(config), a
 
     res.sendStatus(200);
   } catch (err) {
-    console.error("❌ webhook 錯誤：", err);
-    res.sendStatus(200); // 即使錯誤也回傳 200 避免被停用
+    console.error("❌ webhook 處理錯誤：", err);
+    res.sendStatus(200); // 為避免 webhook 被停用，仍回 200
   }
 });
 
-// ✅ /location 使用 JSON body-parser
+// ✅ 接收 LIFF 傳送位置資料
 app.use(bodyParser.json());
 
-// ✅ 接收來自 LIFF 的 GPS 定位資料
 app.post("/location", async (req, res) => {
   const { userId, latitude, longitude } = req.body;
 
   if (!userId || !latitude || !longitude) {
     console.warn("❌ 缺少欄位：", req.body);
-    return res.status(400).send("Missing required fields");
+    return res.status(400).send("Missing fields");
   }
 
   const userLoc = { lat: latitude, lng: longitude };
   const zoneLoc = { lat: dangerZone.lat, lng: dangerZone.lng };
-  const distance = haversine(userLoc, zoneLoc); // 公尺
+  const distance = haversine(userLoc, zoneLoc);
 
   console.log(`📍 ${userId} 距離危險區：${distance.toFixed(2)}m`);
 
   if (distance <= dangerZone.radius && pushableUsers.has(userId)) {
     const now = Date.now();
-    const lastPushed = pushableUsers.get(userId);
+    const lastPushed = pushableUsers.get(userId) || 0;
 
     if (now - lastPushed >= 3 * 60 * 1000) {
       try {
