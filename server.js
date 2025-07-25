@@ -1,9 +1,15 @@
 const express = require("express");
+const cors = require("cors");
 const bodyParser = require("body-parser");
 const line = require("@line/bot-sdk");
 const haversine = require("haversine-distance");
 
 const app = express();
+
+// ✅ 加入 CORS 允許來自 GitHub Pages
+app.use(cors({
+  origin: "*"
+}));
 
 // ✅ LINE Bot 設定
 const config = {
@@ -22,10 +28,12 @@ const dangerZone = {
 // ✅ 儲存可推播的使用者與上次推播時間
 const pushableUsers = new Map(); // userId => timestamp(ms)
 
-// ✅ Webhook 接收訊息（使用 raw body 才能通過 LINE 驗證）
+// ✅ /webhook 使用 raw body (給 LINE 用來驗證簽名)
 app.post("/webhook", bodyParser.raw({ type: "*/*" }), line.middleware(config), async (req, res) => {
   try {
-    const events = req.body.events || [];
+    const bodyString = req.body.toString(); // 將 Buffer 轉為字串
+    const body = JSON.parse(bodyString); // 轉回 JSON
+    const events = body.events || [];
 
     for (const event of events) {
       if (event.type === "message" && event.message.type === "text") {
@@ -63,11 +71,11 @@ app.post("/webhook", bodyParser.raw({ type: "*/*" }), line.middleware(config), a
     res.sendStatus(200);
   } catch (err) {
     console.error("❌ webhook 錯誤：", err);
-    res.sendStatus(200); // 即使錯誤也回傳 200，避免 LINE 關閉 webhook
+    res.sendStatus(200); // 即使錯誤也回傳 200 避免被停用
   }
 });
 
-// ✅ 其他 API 使用 JSON parser（注意順序）
+// ✅ /location 使用 JSON body-parser
 app.use(bodyParser.json());
 
 // ✅ 接收來自 LIFF 的 GPS 定位資料
