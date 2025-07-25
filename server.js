@@ -56,11 +56,7 @@ app.post("/webhook", line.middleware(config), async (req, res) => {
             type: "text",
             text: "🛑 你已關閉追蹤功能。"
           });
-        } else {
-          await client.replyMessage(event.replyToken, {
-            type: "text",
-            text: "請輸入「開啟追蹤」或「關閉追蹤」來控制是否接收危險區通知。"
-          });
+        } );
         }
       }
     }
