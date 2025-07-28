@@ -18,8 +18,8 @@ const client = new line.Client(config);
 
 // ✅ 危險區域定義
 const dangerZone = {
-  lat: 25.16835,
-  lng: 121.45489,
+  lat: 25.01843, 121.54282,
+  lng:  121.54282,
   radius: 500 // 公尺
 };
 
