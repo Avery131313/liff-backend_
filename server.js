@@ -23,10 +23,10 @@ const dangerZone = {
   radius: 500 // 公尺
 };
 
-// ✅ 儲存可推播的使用者與上次推播時間
-const pushableUsers = new Map(); // userId => timestamp
+// ✅ 使用者狀態：包含上次推播與最後定位時間
+const pushableUsers = new Map(); // userId => { lastPushTime, lastLocationTime }
 
-// ✅ webhook：放在 bodyParser 前面
+// ✅ Webhook：一定要在 bodyParser 前面
 app.post("/webhook", line.middleware(config), async (req, res) => {
   try {
     const events = req.body.events || [];
@@ -38,7 +38,10 @@ app.post("/webhook", line.middleware(config), async (req, res) => {
 
         if (text === "開啟追蹤") {
           if (!pushableUsers.has(userId)) {
-            pushableUsers.set(userId, 0);
+            pushableUsers.set(userId, {
+              lastPushTime: 0,
+              lastLocationTime: Date.now()
+            });
             await client.replyMessage(event.replyToken, {
               type: "text",
               text: "✅ 你已成功啟用追蹤通知，請開啟 LIFF 畫面開始定位。"
@@ -62,15 +65,14 @@ app.post("/webhook", line.middleware(config), async (req, res) => {
     res.sendStatus(200);
   } catch (err) {
     console.error("❌ webhook 錯誤：", err);
-    res.sendStatus(200);
+    res.sendStatus(500);
   }
 });
 
-// ✅ 其他 API 再加入 body-parser
+// ✅ 其他 API 才啟用 bodyParser
 app.use(bodyParser.json());
 
-
-// LIFF 傳送位置資料
+// ✅ 接收 LIFF 傳送位置資料
 app.post("/location", async (req, res) => {
   const { userId, latitude, longitude } = req.body;
 
@@ -90,7 +92,7 @@ app.post("/location", async (req, res) => {
     const state = pushableUsers.get(userId);
     state.lastLocationTime = now;
 
-    if (distance <= dangerZone.radius && (now - state.lastPushTime >= 15 * 1000)) {
+    if (distance <= dangerZone.radius && now - state.lastPushTime >= 15 * 1000) {
       try {
         await client.pushMessage(userId, {
           type: "text",
@@ -109,7 +111,7 @@ app.post("/location", async (req, res) => {
   res.sendStatus(200);
 });
 
-// 定時檢查：是否超過 10 分鐘未傳送位置 → 自動關閉追蹤
+// ✅ 自動關閉無更新的用戶（每分鐘檢查）
 setInterval(async () => {
   const now = Date.now();
   for (const [userId, state] of pushableUsers.entries()) {
@@ -120,15 +122,15 @@ setInterval(async () => {
           type: "text",
           text: "📴 由於您已關閉 LIFF 畫面或超過 10 分鐘未回報定位，已自動關閉追蹤。"
         });
-        console.log(`⏹️ 已自動關閉：${userId}`);
+        console.log(`⏹️ 自動關閉：${userId}`);
       } catch (err) {
         console.error("❌ 自動關閉通知失敗：", err.originalError?.response?.data || err);
       }
     }
   }
-}, 60 * 1000); // 每分鐘執行一次
+}, 60 * 1000);
 
-// 啟動伺服器
+// ✅ 啟動伺服器
 const PORT = process.env.PORT || 10000;
 app.listen(PORT, () => {
   console.log(`✅ Server running on port ${PORT}`);
