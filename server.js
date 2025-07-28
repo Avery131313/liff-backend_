@@ -18,8 +18,8 @@ const client = new line.Client(config);
 
 // ✅ 危險區域定義
 const dangerZone = {
-  lat: 25.16835,
-  lng: 121.45489,
+  lat: 25.02603,
+  lng: 121.52628,
   radius: 500 // 公尺
 };
 
@@ -88,7 +88,7 @@ app.post("/location", async (req, res) => {
     const now = Date.now();
     const lastPushed = pushableUsers.get(userId) || 0;
 
-    if (now - lastPushed >= 3 * 60 * 1000) {
+    if (now - lastPushed >= 15 * 1000) {
       try {
         await client.pushMessage(userId, {
           type: "text",
