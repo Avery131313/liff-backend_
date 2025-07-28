@@ -70,7 +70,7 @@ app.post("/webhook", line.middleware(config), async (req, res) => {
 // ✅ 接收 LIFF 傳送位置資料
 app.use(bodyParser.json());
 
-app.post("/location", async (req, res) => {
+  app.post("/location", async (req, res) => {
   const { userId, latitude, longitude } = req.body;
 
   if (!userId || !latitude || !longitude) {
@@ -82,7 +82,9 @@ app.post("/location", async (req, res) => {
   const zoneLoc = { lat: dangerZone.lat, lng: dangerZone.lng };
   const distance = haversine(userLoc, zoneLoc);
 
-  console.log(📍 ${userId} 距離危險區：${distance.toFixed(2)}m);
+  // ✅ 使用反引號撰寫字串模板
+  console.log(`📍 ${userId} 距離危險區：${distance.toFixed(2)}m`);
+
 
   if (distance <= dangerZone.radius && pushableUsers.has(userId)) {
     const now = Date.now();
