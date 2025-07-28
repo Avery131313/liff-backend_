@@ -12,14 +12,14 @@ app.use(cors({ origin: "*", methods: ["GET", "POST"], allowedHeaders: ["Content-
 // ✅ LINE Bot 設定
 const config = {
   channelAccessToken: process.env.CHANNEL_ACCESS_TOKEN,
-  channelSecret: process.env.CHANNEL_SECRET,
+  channelSecret: process.env.CHANNEL_SECRET
 };
 const client = new line.Client(config);
 
 // ✅ 危險區域定義
 const dangerZone = {
-  lat: 25.01843,
-  lng:  121.54282,
+  lat: 25.16835,
+  lng: 121.45489,
   radius: 500 // 公尺
 };
 
@@ -70,7 +70,7 @@ app.post("/webhook", line.middleware(config), async (req, res) => {
 // ✅ 接收 LIFF 傳送位置資料
 app.use(bodyParser.json());
 
-  app.post("/location", async (req, res) => {
+app.post("/location", async (req, res) => {
   const { userId, latitude, longitude } = req.body;
 
   if (!userId || !latitude || !longitude) {
@@ -82,12 +82,13 @@ app.use(bodyParser.json());
   const zoneLoc = { lat: dangerZone.lat, lng: dangerZone.lng };
   const distance = haversine(userLoc, zoneLoc);
 
+  console.log(`📍 ${userId} 距離危險區：${distance.toFixed(2)}m`);
 
   if (distance <= dangerZone.radius && pushableUsers.has(userId)) {
     const now = Date.now();
     const lastPushed = pushableUsers.get(userId) || 0;
 
-    if (now - lastPushed >= 15 * 1000) {
+    if (now - lastPushed >= 3 * 60 * 1000) {
       try {
         await client.pushMessage(userId, {
           type: "text",
@@ -109,5 +110,5 @@ app.use(bodyParser.json());
 // ✅ 啟動伺服器
 const PORT = process.env.PORT || 10000;
 app.listen(PORT, () => {
-  console.log(✅ Server running on port ${PORT});
+  console.log(`✅ Server running on port ${PORT}`);
 });
