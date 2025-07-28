@@ -82,9 +82,6 @@ app.use(bodyParser.json());
   const zoneLoc = { lat: dangerZone.lat, lng: dangerZone.lng };
   const distance = haversine(userLoc, zoneLoc);
 
-  // ✅ 使用反引號撰寫字串模板
-  console.log(`📍 ${userId} 距離危險區：${distance.toFixed(2)}m`);
-
 
   if (distance <= dangerZone.radius && pushableUsers.has(userId)) {
     const now = Date.now();
