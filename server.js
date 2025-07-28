@@ -6,27 +6,27 @@ const haversine = require("haversine-distance");
 
 const app = express();
 
-// ✅ CORS 設定（允許來自 GitHub Pages 等前端）
+// CORS 設定（允許來自 GitHub Pages 等前端）
 app.use(cors({ origin: "*", methods: ["GET", "POST"], allowedHeaders: ["Content-Type"] }));
 
-// ✅ LINE Bot 設定
+// LINE Bot 設定
 const config = {
   channelAccessToken: process.env.CHANNEL_ACCESS_TOKEN,
   channelSecret: process.env.CHANNEL_SECRET
 };
 const client = new line.Client(config);
 
-// ✅ 危險區域定義
+// 危險區域定義
 const dangerZone = {
   lat: 25.01843,
   lng:  121.54282,
   radius: 500 // 公尺
 };
 
-// ✅ 儲存可推播的使用者與上次推播時間
+// 儲存可推播的使用者與上次推播時間
 const pushableUsers = new Map(); // userId => timestamp
 
-// ✅ webhook 處理訊息（啟用 / 關閉 追蹤）
+// webhook 處理訊息（啟用 / 關閉 追蹤）
 app.post("/webhook", line.middleware(config), async (req, res) => {
   try {
     const events = req.body.events || [];
@@ -67,7 +67,7 @@ app.post("/webhook", line.middleware(config), async (req, res) => {
   }
 });
 
-// ✅ 接收 LIFF 傳送位置資料
+// 接收 LIFF 傳送位置資料
 app.use(bodyParser.json());
 
 app.post("/location", async (req, res) => {
