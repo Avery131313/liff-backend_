@@ -88,7 +88,7 @@ app.post("/location", async (req, res) => {
     const now = Date.now();
     const lastPushed = pushableUsers.get(userId) || 0;
 
-    if (now - lastPushed >= 3 * 60 * 1000) {
+    if (now - lastPushed >= 3 * 1000) {
       try {
         await client.pushMessage(userId, {
           type: "text",
