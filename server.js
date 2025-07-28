@@ -1,12 +1,12 @@
 const express = require("express");
 const cors = require("cors");
-const line = require("@line/bot-sdk");
 const bodyParser = require("body-parser");
+const line = require("@line/bot-sdk");
 const haversine = require("haversine-distance");
 
 const app = express();
 
-// ✅ CORS 設定
+// ✅ CORS 設定（允許來自 GitHub Pages 等前端）
 app.use(cors({ origin: "*", methods: ["GET", "POST"], allowedHeaders: ["Content-Type"] }));
 
 // ✅ LINE Bot 設定
@@ -19,14 +19,14 @@ const client = new line.Client(config);
 // ✅ 危險區域定義
 const dangerZone = {
   lat: 25.01843,
-  lng: 121.54282,
+  lng:  121.54282,
   radius: 500 // 公尺
 };
 
-// ✅ 使用者狀態：包含上次推播與最後定位時間
-const pushableUsers = new Map(); // userId => { lastPushTime, lastLocationTime }
+// ✅ 儲存可推播的使用者與上次推播時間
+const pushableUsers = new Map(); // userId => timestamp
 
-// ✅ Webhook：一定要在 bodyParser 前面
+// ✅ webhook 處理訊息（啟用 / 關閉 追蹤）
 app.post("/webhook", line.middleware(config), async (req, res) => {
   try {
     const events = req.body.events || [];
@@ -38,10 +38,7 @@ app.post("/webhook", line.middleware(config), async (req, res) => {
 
         if (text === "開啟追蹤") {
           if (!pushableUsers.has(userId)) {
-            pushableUsers.set(userId, {
-              lastPushTime: 0,
-              lastLocationTime: Date.now()
-            });
+            pushableUsers.set(userId, 0);
             await client.replyMessage(event.replyToken, {
               type: "text",
               text: "✅ 你已成功啟用追蹤通知，請開啟 LIFF 畫面開始定位。"
@@ -59,20 +56,20 @@ app.post("/webhook", line.middleware(config), async (req, res) => {
             text: "🛑 你已關閉追蹤功能。"
           });
         }
+        // 其他訊息不回覆任何內容（不再提示開關指令）
       }
     }
 
     res.sendStatus(200);
   } catch (err) {
-    console.error("❌ webhook 錯誤：", err);
-    res.sendStatus(500);
+    console.error("❌ webhook 處理錯誤：", err);
+    res.sendStatus(200);
   }
 });
 
-// ✅ 其他 API 才啟用 bodyParser
+// ✅ 接收 LIFF 傳送位置資料
 app.use(bodyParser.json());
 
-// ✅ 接收 LIFF 傳送位置資料
 app.post("/location", async (req, res) => {
   const { userId, latitude, longitude } = req.body;
 
@@ -85,54 +82,33 @@ app.post("/location", async (req, res) => {
   const zoneLoc = { lat: dangerZone.lat, lng: dangerZone.lng };
   const distance = haversine(userLoc, zoneLoc);
 
-  console.log(`📍 ${userId} 距離危險區：${distance.toFixed(2)}m`);
+  console.log(📍 ${userId} 距離危險區：${distance.toFixed(2)}m);
 
-  if (pushableUsers.has(userId)) {
+  if (distance <= dangerZone.radius && pushableUsers.has(userId)) {
     const now = Date.now();
-    const state = pushableUsers.get(userId);
-    state.lastLocationTime = now;
+    const lastPushed = pushableUsers.get(userId) || 0;
 
-    if (distance <= dangerZone.radius && now - state.lastPushTime >= 15 * 1000) {
+    if (now - lastPushed >= 15 * 1000) {
       try {
         await client.pushMessage(userId, {
           type: "text",
           text: "⚠️ 警告：您已進入危險區域，請注意安全！"
         });
-        state.lastPushTime = now;
         console.log("✅ 推播成功");
+        pushableUsers.set(userId, now);
       } catch (err) {
         console.error("❌ 推播失敗：", err.originalError?.response?.data || err);
       }
+    } else {
+      console.log("⏱️ 推播冷卻中，暫不重複通知");
     }
-
-    pushableUsers.set(userId, state);
   }
 
   res.sendStatus(200);
 });
 
-// ✅ 自動關閉無更新的用戶（每分鐘檢查）
-setInterval(async () => {
-  const now = Date.now();
-  for (const [userId, state] of pushableUsers.entries()) {
-    if (now - state.lastLocationTime > 10 * 60 * 1000) {
-      pushableUsers.delete(userId);
-      try {
-        await client.pushMessage(userId, {
-          type: "text",
-          text: "📴 由於您已關閉 LIFF 畫面或超過 10 分鐘未回報定位，已自動關閉追蹤。"
-        });
-        console.log(`⏹️ 自動關閉：${userId}`);
-      } catch (err) {
-        console.error("❌ 自動關閉通知失敗：", err.originalError?.response?.data || err);
-      }
-    }
-  }
-}, 60 * 1000);
-
 // ✅ 啟動伺服器
 const PORT = process.env.PORT || 10000;
 app.listen(PORT, () => {
-  console.log(`✅ Server running on port ${PORT}`);
+  console.log(✅ Server running on port ${PORT});
 });
-
