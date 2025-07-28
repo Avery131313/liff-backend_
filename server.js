@@ -82,7 +82,7 @@ app.post("/location", async (req, res) => {
   const zoneLoc = { lat: dangerZone.lat, lng: dangerZone.lng };
   const distance = haversine(userLoc, zoneLoc);
 
-  console.log(📍 ${userId} 距離危險區：${distance.toFixed(2)}m);
+  console.log('📍 ${userId} 距離危險區：${distance.toFixed(2)}m');
 
   if (distance <= dangerZone.radius && pushableUsers.has(userId)) {
     const now = Date.now();
