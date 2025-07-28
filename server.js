@@ -11,8 +11,8 @@ app.use(cors({ origin: "*", methods: ["GET", "POST"], allowedHeaders: ["Content-
 
 // ✅ LINE Bot 設定
 const config = {
-  channelAccessToken: process.env.Mf9ijAxu88LsfFdi1wH27O+IPjolotrfy8Cn+gK13xutokom+Nk/wJaLXZDjg/KXYo+ksgKRUSMeKG1dTXOrJfvz1DjLaro8e+EMtvV0fN9MkM7z9qBvZsNquIHnj/OBmuxpCST+QtbKLdLd5dcs7wdB04t89/1O/w1cDnyilFU=,
-  channelSecret: process.env.7321f5dae606ba3d76398a7e60ca0de2,
+  channelAccessToken: process.env.CHANNEL_ACCESS_TOKEN,
+  channelSecret: process.env.CHANNEL_SECRET,
 };
 const client = new line.Client(config);
 
