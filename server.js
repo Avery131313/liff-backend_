@@ -1,31 +1,32 @@
 const express = require("express");
 const cors = require("cors");
-const bodyParser = require("body-parser");
 const line = require("@line/bot-sdk");
+const bodyParser = require("body-parser");
 const haversine = require("haversine-distance");
 
 const app = express();
 
+// ✅ CORS 設定
 app.use(cors({ origin: "*", methods: ["GET", "POST"], allowedHeaders: ["Content-Type"] }));
-app.use(bodyParser.json());
 
+// ✅ LINE Bot 設定
 const config = {
   channelAccessToken: process.env.CHANNEL_ACCESS_TOKEN,
   channelSecret: process.env.CHANNEL_SECRET
 };
 const client = new line.Client(config);
 
-// 危險區域定義
+// ✅ 危險區域定義
 const dangerZone = {
   lat: 25.01843,
   lng: 121.54282,
   radius: 500 // 公尺
 };
 
-// 儲存使用者狀態：{ lastPushTime, lastLocationTime }
-const pushableUsers = new Map();
+// ✅ 儲存可推播的使用者與上次推播時間
+const pushableUsers = new Map(); // userId => timestamp
 
-// webhook 接收訊息：「開啟追蹤」或「關閉追蹤」
+// ✅ webhook：放在 bodyParser 前面
 app.post("/webhook", line.middleware(config), async (req, res) => {
   try {
     const events = req.body.events || [];
@@ -37,10 +38,7 @@ app.post("/webhook", line.middleware(config), async (req, res) => {
 
         if (text === "開啟追蹤") {
           if (!pushableUsers.has(userId)) {
-            pushableUsers.set(userId, {
-              lastPushTime: 0,
-              lastLocationTime: Date.now()
-            });
+            pushableUsers.set(userId, 0);
             await client.replyMessage(event.replyToken, {
               type: "text",
               text: "✅ 你已成功啟用追蹤通知，請開啟 LIFF 畫面開始定位。"
@@ -67,6 +65,10 @@ app.post("/webhook", line.middleware(config), async (req, res) => {
     res.sendStatus(200);
   }
 });
+
+// ✅ 其他 API 再加入 body-parser
+app.use(bodyParser.json());
+
 
 // LIFF 傳送位置資料
 app.post("/location", async (req, res) => {
