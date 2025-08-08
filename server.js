@@ -11,7 +11,6 @@ const os = require("os");
 
 const app = express();
 
-/* ============ 基本設定 ============ */
 app.use(
   cors({
     origin: "*",
@@ -19,15 +18,12 @@ app.use(
     allowedHeaders: ["Content-Type", "X-Line-Signature"],
   })
 );
-// 千萬不要在全域掛 JSON（避免破壞 LINE 驗簽）
 // app.use(bodyParser.json());
 
-/* ============ 可下載目錄（Render 可寫：/tmp） ============ */
 function ensureDir(dir) { try { fs.mkdirSync(dir, { recursive: true }); } catch {} }
 const REPORTS_DIR = path.join(os.tmpdir(), "reports");
 ensureDir(REPORTS_DIR);
 
-// 讓 /reports 指向 /tmp/reports（處理中文檔名 OK）
 app.use("/reports", express.static(REPORTS_DIR, { fallthrough: false }));
 
 /* ============ LINE Bot 設定 ============ */
@@ -37,7 +33,7 @@ const config = {
 };
 const client = new line.Client(config);
 
-/* ============ 危險區與推播（原功能保留） ============ */
+/* ============ 危險區與推播 ============ */
 const dangerZone = { lat: 25.01528, lng: 121.5474, radius: 500 }; // m
 const pushableUsers = new Map(); // userId => timestamp
 
@@ -54,11 +50,9 @@ function ts() {
   )}${p(d.getMinutes())}${p(d.getSeconds())}`;
 }
 function getBaseUrl() {
-  // Render 會提供 RENDER_EXTERNAL_URL；你也可自行設 PUBLIC_BASE_URL
   return process.env.PUBLIC_BASE_URL || process.env.RENDER_EXTERNAL_URL || "";
 }
 
-// 壓縮 reportDir 到 /tmp/reports/<zipBaseName>.zip，回傳完整 URL（但我們只 log 不回給用戶）
 async function zipToPublic(reportDir, zipBaseName) {
   const safeBase = (zipBaseName || "report").replace(/[\\/:*?"<>|]/g, "_");
   const zipFilename = `${safeBase}.zip`;               // 檔案系統上保留中文檔名
@@ -80,11 +74,10 @@ async function zipToPublic(reportDir, zipBaseName) {
   const base = getBaseUrl();
   const url = (base ? `${base}` : "") + `/reports/${encoded}`;
   console.log("✅ ZIP created:", zipPath);
-  console.log("🔗 下載連結（後台用）：", url);
+  console.log("🔗 下載連結：", url);
   return url;
 }
 
-/* ============ 啟動回報：每次建立「顯示名稱版」資料夾 ============ */
 async function startReport(event, category) {
   const userId = event.source?.userId;
   if (!userId) {
@@ -92,7 +85,7 @@ async function startReport(event, category) {
     return;
   }
 
-  // 顯示名稱 → 資料夾名：YYYYMMDD_HHMMSS_顯示名稱（非法字元 → _）
+  // 顯示名稱
   let displayName = null;
   try {
     const profile = await client.getProfile(userId);
@@ -127,11 +120,11 @@ async function startReport(event, category) {
 
   await client.replyMessage(event.replyToken, {
     type: "text",
-    text: `已建立「${category}」回報資料夾：\n${folderName}\n\n請依序上傳：\n1) 一張照片\n2) 位置（LINE 位置訊息或由 LIFF 上報）`,
+    text: `已建立「${category}」回報資料夾：\n${folderName}\n\n請依序上傳：\n1) 一張照片\n2) 位置`,
   });
 }
 
-/* ============ 完成檢查（完成即生成 ZIP，連結只寫 Logs） ============ */
+
 async function finishIfReady(userId, replyToken) {
   const st = pendingReports.get(userId);
   if (!st) return false;
@@ -158,7 +151,7 @@ async function finishIfReady(userId, replyToken) {
   return false;
 }
 
-/* ============ webhook（不要在全域掛 JSON） ============ */
+
 app.post("/webhook", line.middleware(config), async (req, res) => {
   try {
     const events = req.body.events || [];
@@ -178,7 +171,7 @@ app.post("/webhook", line.middleware(config), async (req, res) => {
               pushableUsers.set(userId, 0);
               await client.replyMessage(event.replyToken, {
                 type: "text",
-                text: "✅ 你已成功啟用追蹤通知，請開啟 LIFF 畫面開始定位。",
+                text: "✅ 你已成功啟用追蹤通知，請開啟連結開始定位。",
               });
             } else {
               await client.replyMessage(event.replyToken, { type: "text", text: "🔁 你已經啟用過追蹤通知。" });
