@@ -7,6 +7,7 @@ const haversine = require("haversine-distance");
 const fs = require("fs");
 const path = require("path");
 const archiver = require("archiver");
+const os = require("os");
 
 const app = express();
 
@@ -18,14 +19,18 @@ app.use(
     allowedHeaders: ["Content-Type", "X-Line-Signature"],
   })
 );
-// 千萬不要在全域掛 JSON 解析，避免破壞 LINE 驗簽
+// 別在全域掛 JSON（避免破壞 LINE 驗簽）
 // app.use(bodyParser.json());
 
-/* ============ 靜態檔（用來對外提供 zip 下載） ============ */
-const publicDir = path.join(__dirname, "public");
-const publicReportsDir = path.join(publicDir, "reports");
-ensureDir(publicReportsDir);
-app.use(express.static(publicDir)); // 讓 /public 底下檔案可用 / 開頭網址直接存取
+/* ============ 可下載目錄（Render 可寫：/tmp） ============ */
+function ensureDir(dir) {
+  try { fs.mkdirSync(dir, { recursive: true }); } catch {}
+}
+const REPORTS_DIR = path.join(os.tmpdir(), "reports");
+ensureDir(REPORTS_DIR);
+
+// 將 /tmp/reports 以 /reports 對外提供靜態下載（處理中文檔名）
+app.use("/reports", express.static(REPORTS_DIR, { fallthrough: false }));
 
 /* ============ LINE Bot 設定 ============ */
 const config = {
@@ -50,20 +55,18 @@ function ts() {
     d.getHours()
   )}${p(d.getMinutes())}${p(d.getSeconds())}`;
 }
-function ensureDir(dir) {
-  if (!fs.existsSync(dir)) fs.mkdirSync(dir, { recursive: true });
-}
 function getBaseUrl() {
-  // Render 會提供 RENDER_EXTERNAL_URL；你也可改用 PUBLIC_BASE_URL
+  // Render 會提供 RENDER_EXTERNAL_URL；也可自行設 PUBLIC_BASE_URL
   return process.env.PUBLIC_BASE_URL || process.env.RENDER_EXTERNAL_URL || "";
 }
-// 將某資料夾壓成 zip 並存到 /public/reports，回傳 zip 的公開 URL（或相對路徑）
-async function zipToPublic(reportDir, zipBaseName) {
-  const safeZip = zipBaseName.replace(/[\\/:*?"<>|]/g, "_") + ".zip";
-  const zipPath = path.join(publicReportsDir, safeZip);
 
-  // 若存在先刪除，避免覆蓋問題
-  try { if (fs.existsSync(zipPath)) fs.unlinkSync(zipPath); } catch(e){}
+// 壓縮 reportDir 到 /tmp/reports/<zipBaseName>.zip，回傳可直接下載的完整 URL
+async function zipToPublic(reportDir, zipBaseName) {
+  const safeBase = (zipBaseName || "report").replace(/[\\/:*?"<>|]/g, "_");
+  const zipFilename = `${safeBase}.zip`;                    // 寫到檔案系統的檔名（保持中文）
+  const zipPath = path.join(REPORTS_DIR, zipFilename);
+
+  try { if (fs.existsSync(zipPath)) fs.unlinkSync(zipPath); } catch {}
 
   await new Promise((resolve, reject) => {
     const output = fs.createWriteStream(zipPath);
@@ -75,10 +78,12 @@ async function zipToPublic(reportDir, zipBaseName) {
     archive.finalize();
   });
 
+  // URL 需對檔名做 URL encode，避免中文/空白問題
+  const encoded = encodeURIComponent(zipFilename);
   const base = getBaseUrl();
-  // 靜態檔路徑：/reports/<zip>
-  const urlPath = `/reports/${safeZip}`;
-  return base ? `${base}${urlPath}` : urlPath;
+  const url = (base ? `${base}` : "") + `/reports/${encoded}`;
+  console.log("✅ ZIP created:", zipPath, "→ URL:", url);
+  return url;
 }
 
 /* ============ 啟動回報：每次建立「顯示名稱版」資料夾 ============ */
@@ -92,7 +97,7 @@ async function startReport(event, category) {
     return;
   }
 
-  // 顯示名稱 → 資料夾名：YYYYMMDD_HHMMSS_顯示名稱（非法字元 → _）
+  // 先拿顯示名稱，組資料夾名：YYYYMMDD_HHMMSS_顯示名稱（非法字元 → _）
   let displayName = null;
   try {
     const profile = await client.getProfile(userId);
@@ -102,7 +107,7 @@ async function startReport(event, category) {
     (displayName && displayName.replace(/[\\/:*?"<>|]/g, "_").trim()) ||
     userId;
 
-  // 父目錄：./疑似蜜蜂 或 ./疑似蜂巢
+  // 父目錄：./疑似蜜蜂 或 ./疑似蜂巢（存在於容器本機，暫存）
   const baseDir = path.join(__dirname, category);
   ensureDir(baseDir);
 
@@ -111,7 +116,7 @@ async function startReport(event, category) {
   const reportDir = path.join(baseDir, folderName);
   ensureDir(reportDir);
 
-  // name.txt（真正顯示名稱；取不到就空字串）
+  // name.txt（仍存真正顯示名稱；取不到就空字串）
   try {
     fs.writeFileSync(
       path.join(reportDir, "name.txt"),
@@ -325,7 +330,7 @@ app.post("/location", bodyParser.json(), async (req, res) => {
     }
   }
 
-  // 回報模式：寫入 location.txt；若完成→產出 ZIP 連結
+  // 回報模式：寫入 location.txt；若完成→產出 ZIP 連結（/reports/xxx.zip）
   const st = pendingReports.get(userId);
   if (st) {
     try {
@@ -368,8 +373,8 @@ app.listen(PORT, () => {
   console.log(`✅ Server running on port ${PORT}`);
   const base = getBaseUrl();
   if (base) {
-    console.log(`🔗 ZIP 會放在：${base}/reports/<檔名>.zip`);
+    console.log(`🔗 ZIP 靜態下載根路徑：${base}/reports/<檔名>.zip`);
   } else {
-    console.log("ℹ️ 建議設定 PUBLIC_BASE_URL（或使用 Render 內建 RENDER_EXTERNAL_URL）以便回傳完整下載連結。");
+    console.log("ℹ️ 建議設定 PUBLIC_BASE_URL（或用 Render 內建 RENDER_EXTERNAL_URL）以便回傳完整下載連結。");
   }
 });
