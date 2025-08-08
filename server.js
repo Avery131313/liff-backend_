@@ -21,6 +21,12 @@ app.use(
 // 千萬不要在全域掛 JSON 解析，避免破壞 LINE 驗簽
 // app.use(bodyParser.json());
 
+/* ============ 靜態檔（用來對外提供 zip 下載） ============ */
+const publicDir = path.join(__dirname, "public");
+const publicReportsDir = path.join(publicDir, "reports");
+ensureDir(publicReportsDir);
+app.use(express.static(publicDir)); // 讓 /public 底下檔案可用 / 開頭網址直接存取
+
 /* ============ LINE Bot 設定 ============ */
 const config = {
   channelAccessToken: process.env.CHANNEL_ACCESS_TOKEN,
@@ -33,7 +39,7 @@ const dangerZone = { lat: 25.01528, lng: 121.5474, radius: 500 }; // m
 const pushableUsers = new Map(); // userId => timestamp
 
 /* ============ 回報流程暫存 ============ */
-// userId -> { category, reportDir, hasPhoto, hasLocation }
+// userId -> { category, reportDir, hasPhoto, hasLocation, folderName }
 const pendingReports = new Map();
 
 /* ============ 小工具 ============ */
@@ -47,10 +53,32 @@ function ts() {
 function ensureDir(dir) {
   if (!fs.existsSync(dir)) fs.mkdirSync(dir, { recursive: true });
 }
-function buildDownloadUrl(reportDir) {
-  const base = process.env.PUBLIC_BASE_URL; // e.g. https://your-app.onrender.com
-  if (!base) return null;
-  return `${base}/report/download?dir=${encodeURIComponent(reportDir)}`;
+function getBaseUrl() {
+  // Render 會提供 RENDER_EXTERNAL_URL；你也可改用 PUBLIC_BASE_URL
+  return process.env.PUBLIC_BASE_URL || process.env.RENDER_EXTERNAL_URL || "";
+}
+// 將某資料夾壓成 zip 並存到 /public/reports，回傳 zip 的公開 URL（或相對路徑）
+async function zipToPublic(reportDir, zipBaseName) {
+  const safeZip = zipBaseName.replace(/[\\/:*?"<>|]/g, "_") + ".zip";
+  const zipPath = path.join(publicReportsDir, safeZip);
+
+  // 若存在先刪除，避免覆蓋問題
+  try { if (fs.existsSync(zipPath)) fs.unlinkSync(zipPath); } catch(e){}
+
+  await new Promise((resolve, reject) => {
+    const output = fs.createWriteStream(zipPath);
+    const archive = archiver("zip", { zlib: { level: 9 } });
+    output.on("close", resolve);
+    archive.on("error", reject);
+    archive.directory(reportDir, false);
+    archive.pipe(output);
+    archive.finalize();
+  });
+
+  const base = getBaseUrl();
+  // 靜態檔路徑：/reports/<zip>
+  const urlPath = `/reports/${safeZip}`;
+  return base ? `${base}${urlPath}` : urlPath;
 }
 
 /* ============ 啟動回報：每次建立「顯示名稱版」資料夾 ============ */
@@ -64,14 +92,12 @@ async function startReport(event, category) {
     return;
   }
 
-  // 先拿顯示名稱，組資料夾名：YYYYMMDD_HHMMSS_顯示名稱
+  // 顯示名稱 → 資料夾名：YYYYMMDD_HHMMSS_顯示名稱（非法字元 → _）
   let displayName = null;
   try {
     const profile = await client.getProfile(userId);
     displayName = (profile?.displayName || "").trim();
-  } catch {
-    // ignore — 取不到就用 userId
-  }
+  } catch {}
   const safeName =
     (displayName && displayName.replace(/[\\/:*?"<>|]/g, "_").trim()) ||
     userId;
@@ -81,11 +107,11 @@ async function startReport(event, category) {
   ensureDir(baseDir);
 
   // 最終資料夾：YYYYMMDD_HHMMSS_顯示名稱(或 userId)
-  const folder = `${ts()}_${safeName}`;
-  const reportDir = path.join(baseDir, folder);
+  const folderName = `${ts()}_${safeName}`;
+  const reportDir = path.join(baseDir, folderName);
   ensureDir(reportDir);
 
-  // name.txt（仍然存真正顯示名稱；取不到就空字串）
+  // name.txt（真正顯示名稱；取不到就空字串）
   try {
     fs.writeFileSync(
       path.join(reportDir, "name.txt"),
@@ -102,15 +128,16 @@ async function startReport(event, category) {
     reportDir,
     hasPhoto: false,
     hasLocation: false,
+    folderName,
   });
 
   await client.replyMessage(event.replyToken, {
     type: "text",
-    text: `已建立「${category}」回報資料夾：\n${folder}\n\n請依序上傳：\n1) 一張照片\n2) 位置（LINE 位置訊息或由 LIFF 上報）`,
+    text: `已建立「${category}」回報資料夾：\n${folderName}\n\n請依序上傳：\n1) 一張照片\n2) 位置（LINE 位置訊息或由 LIFF 上報）`,
   });
 }
 
-/* ============ 完成檢查 ============ */
+/* ============ 完成檢查（完成即產生 ZIP 連結） ============ */
 async function finishIfReady(userId, replyToken) {
   const st = pendingReports.get(userId);
   if (!st) return false;
@@ -118,10 +145,14 @@ async function finishIfReady(userId, replyToken) {
   if (st.hasPhoto && st.hasLocation) {
     pendingReports.delete(userId);
 
-    const url = buildDownloadUrl(st.reportDir);
-    const text = url
-      ? `📦 已完成存檔（照片＋定位＋名稱）。\n點此打包下載：\n${url}`
-      : `📦 已完成存檔（照片＋定位＋名稱）。`;
+    let text;
+    try {
+      const url = await zipToPublic(st.reportDir, st.folderName);
+      text = `📦 已完成存檔（照片＋定位＋名稱）。\n\n⬇️ 直接下載 ZIP：\n${url}`;
+    } catch (e) {
+      console.error("壓縮/產出下載連結失敗：", e);
+      text = `📦 已完成存檔（照片＋定位＋名稱）。\n（ZIP 生成失敗，可稍後再試）`;
+    }
 
     if (replyToken) {
       await client.replyMessage(replyToken, { type: "text", text });
@@ -294,7 +325,7 @@ app.post("/location", bodyParser.json(), async (req, res) => {
     }
   }
 
-  // 新：回報模式→寫入 location.txt
+  // 回報模式：寫入 location.txt；若完成→產出 ZIP 連結
   const st = pendingReports.get(userId);
   if (st) {
     try {
@@ -302,14 +333,21 @@ app.post("/location", bodyParser.json(), async (req, res) => {
       fs.writeFileSync(path.join(st.reportDir, "location.txt"), locStr, "utf8");
       st.hasLocation = true;
 
-      const url = buildDownloadUrl(st.reportDir);
-      const done = st.hasPhoto && st.hasLocation;
-      if (done) {
+      if (st.hasPhoto && st.hasLocation) {
         pendingReports.delete(userId);
-        const text = url
-          ? `📦 已完成存檔（照片＋定位＋名稱）。\n點此打包下載：\n${url}`
-          : `📦 已完成存檔（照片＋定位＋名稱）。`;
-        await client.pushMessage(userId, { type: "text", text });
+        try {
+          const url = await zipToPublic(st.reportDir, st.folderName);
+          await client.pushMessage(userId, {
+            type: "text",
+            text: `📦 已完成存檔（照片＋定位＋名稱）。\n\n⬇️ 直接下載 ZIP：\n${url}`,
+          });
+        } catch (e) {
+          console.error("壓縮/產出下載連結失敗（/location 完成）：", e);
+          await client.pushMessage(userId, {
+            type: "text",
+            text: "📦 已完成存檔，但 ZIP 生成失敗，可稍後再試。",
+          });
+        }
       } else {
         await client.pushMessage(userId, {
           type: "text",
@@ -324,44 +362,14 @@ app.post("/location", bodyParser.json(), async (req, res) => {
   res.sendStatus(200);
 });
 
-/* ============ ZIP 下載 ============ */
-app.get("/report/download", async (req, res) => {
-  try {
-    const dir = req.query.dir;
-    if (!dir) return res.status(400).send("Missing dir");
-
-    const abs = path.resolve(dir);
-    if (!abs.startsWith(path.resolve(__dirname)))
-      return res.status(403).send("Forbidden");
-
-    if (!fs.existsSync(abs) || !fs.lstatSync(abs).isDirectory())
-      return res.status(404).send("Not found");
-
-    const zipName = path.basename(abs) + ".zip";
-    res.setHeader("Content-Type", "application/zip");
-    res.setHeader("Content-Disposition", `attachment; filename="${zipName}"`);
-
-    const archive = archiver("zip", { zlib: { level: 9 } });
-    archive.directory(abs, false);
-    archive.on("error", (err) => {
-      throw err;
-    });
-    archive.pipe(res);
-    await archive.finalize();
-  } catch (e) {
-    console.error("download error:", e);
-    if (!res.headersSent) res.status(500).send("Server error");
-  }
-});
-
 /* ============ 啟動伺服器 ============ */
 const PORT = process.env.PORT || 10000;
 app.listen(PORT, () => {
   console.log(`✅ Server running on port ${PORT}`);
-  if (process.env.PUBLIC_BASE_URL) {
-    console.log(
-      `⬇️ 下載 API：${process.env.PUBLIC_BASE_URL}/report/download?dir=<reportDir>`
-    );
+  const base = getBaseUrl();
+  if (base) {
+    console.log(`🔗 ZIP 會放在：${base}/reports/<檔名>.zip`);
+  } else {
+    console.log("ℹ️ 建議設定 PUBLIC_BASE_URL（或使用 Render 內建 RENDER_EXTERNAL_URL）以便回傳完整下載連結。");
   }
 });
-
