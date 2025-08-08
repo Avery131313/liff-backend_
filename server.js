@@ -18,8 +18,8 @@ app.use(
   })
 );
 
-// ✅ 解析 JSON（給 /location 用）
-app.use(bodyParser.json());
+// ❌ 不要在這裡全域掛 JSON，會破壞 LINE 驗簽
+// app.use(bodyParser.json());
 
 // ✅ LINE Bot 設定
 const config = {
@@ -39,12 +39,7 @@ const dangerZone = {
 const pushableUsers = new Map(); // userId => timestamp
 
 // ======【新增】回報狀態管理（疑似蜜蜂 / 疑似蜂巢）======
-// userId -> {
-//   category: "疑似蜜蜂" | "疑似蜂巢",
-//   reportDir: 絕對路徑（./疑似蜜蜂/20250808_181200_userId/）,
-//   hasPhoto: boolean,
-//   hasLocation: boolean
-// }
+// userId -> { category, reportDir, hasPhoto, hasLocation }
 const pendingReports = new Map();
 
 function ts() {
@@ -101,8 +96,7 @@ async function startReport(event, category) {
 }
 
 function buildDownloadUrl(reportDir) {
-  // 需要在 Render/環境變數設 PUBLIC_BASE_URL，如 https://your-app.onrender.com
-  const base = process.env.PUBLIC_BASE_URL;
+  const base = process.env.PUBLIC_BASE_URL; // e.g. https://your-app.onrender.com
   if (!base) return null;
   return `${base}/report/download?dir=${encodeURIComponent(reportDir)}`;
 }
@@ -113,10 +107,9 @@ async function finishIfReady(userId, replyToken) {
   if (st.hasPhoto && st.hasLocation) {
     pendingReports.delete(userId);
     const url = buildDownloadUrl(st.reportDir);
-    const text =
-      url
-        ? `📦「${st.category}」已完成存檔（照片＋定位＋名稱）。\n點此下載整包 zip：\n${url}`
-        : `📦「${st.category}」已完成存檔（照片＋定位＋名稱）。`;
+    const text = url
+      ? `📦「${st.category}」已完成存檔（照片＋定位＋名稱）。\n點此下載整包 zip：\n${url}`
+      : `📦「${st.category}」已完成存檔（照片＋定位＋名稱）。`;
 
     if (replyToken) {
       await client.replyMessage(replyToken, { type: "text", text });
@@ -128,7 +121,7 @@ async function finishIfReady(userId, replyToken) {
   return false;
 }
 
-// ✅ webhook 處理訊息（啟用 / 關閉 追蹤 +【新增】回報流程）
+// ✅ webhook（必須放在任何 body parser 之前）
 app.post("/webhook", line.middleware(config), async (req, res) => {
   try {
     const events = req.body.events || [];
@@ -140,7 +133,7 @@ app.post("/webhook", line.middleware(config), async (req, res) => {
         const userId = event.source?.userId;
         const msg = event.message;
 
-        // ---- 文字：維持原有兩個指令；其餘不回覆 ----
+        // ---- 文字：原有兩個指令；其餘不回覆 ----
         if (msg.type === "text") {
           const text = (msg.text || "").trim();
 
@@ -175,11 +168,11 @@ app.post("/webhook", line.middleware(config), async (req, res) => {
             continue;
           }
 
-          // 其它文字：維持原本「不回覆」的行為
+          // 其它文字：維持不回覆
           continue;
         }
 
-        // ---- 圖片：只有在回報模式下才存，否則忽略（不影響原行為） ----
+        // ---- 圖片：僅回報模式存檔 ----
         if (msg.type === "image") {
           const st = pendingReports.get(userId);
           if (!st) continue;
@@ -212,7 +205,7 @@ app.post("/webhook", line.middleware(config), async (req, res) => {
           continue;
         }
 
-        // ---- LINE 位置訊息：在回報模式下寫入 ----
+        // ---- LINE 位置訊息：僅回報模式寫入 ----
         if (msg.type === "location") {
           const st = pendingReports.get(userId);
           if (!st) continue;
@@ -243,7 +236,7 @@ app.post("/webhook", line.middleware(config), async (req, res) => {
           continue;
         }
 
-        // 其它訊息型別：維持忽略
+        // 其它訊息型別：忽略
       } catch (e) {
         console.error("❌ webhook 單一事件錯誤：", e);
       }
@@ -256,8 +249,8 @@ app.post("/webhook", line.middleware(config), async (req, res) => {
   }
 });
 
-// ✅ 接收 LIFF 傳送位置資料（保留原有邏輯 +【新增】若在回報模式也寫入）
-app.post("/location", async (req, res) => {
+// ✅ 接收 LIFF 傳送位置資料（只在這條路由掛 JSON parser）
+app.post("/location", bodyParser.json(), async (req, res) => {
   const { userId, latitude, longitude } = req.body;
 
   if (!userId || !latitude || !longitude) {
@@ -291,7 +284,7 @@ app.post("/location", async (req, res) => {
     }
   }
 
-  // 【新增】如果使用者正處於回報模式，把座標寫入 location.txt
+  // 【新增】回報模式：寫入 location.txt
   const st = pendingReports.get(userId);
   if (st) {
     try {
@@ -299,15 +292,13 @@ app.post("/location", async (req, res) => {
       fs.writeFileSync(path.join(st.reportDir, "location.txt"), locStr, "utf8");
       st.hasLocation = true;
 
-      // 這裡沒有 replyToken，用 push 通知
       const url = buildDownloadUrl(st.reportDir);
       const done = st.hasPhoto && st.hasLocation;
       if (done) {
         pendingReports.delete(userId);
-        const text =
-          url
-            ? `📦「${st.category}」已完成存檔（照片＋定位＋名稱）。\n點此下載整包 zip：\n${url}`
-            : `📦「${st.category}」已完成存檔（照片＋定位＋名稱）。`;
+        const text = url
+          ? `📦「${st.category}」已完成存檔（照片＋定位＋名稱）。\n點此下載整包 zip：\n${url}`
+          : `📦「${st.category}」已完成存檔（照片＋定位＋名稱）。`;
         await client.pushMessage(userId, { type: "text", text });
       } else {
         await client.pushMessage(userId, {
@@ -324,7 +315,6 @@ app.post("/location", async (req, res) => {
 });
 
 // ======【新增】資料夾下載（zip）======
-// 需要設定 PUBLIC_BASE_URL 才會在完成時回傳連結；此路由本身不影響原功能
 app.get("/report/download", async (req, res) => {
   try {
     const dir = req.query.dir;
@@ -359,7 +349,9 @@ const PORT = process.env.PORT || 10000;
 app.listen(PORT, () => {
   console.log(`✅ Server running on port ${PORT}`);
   if (process.env.PUBLIC_BASE_URL) {
-    console.log(`⬇️ 下載 API：${process.env.PUBLIC_BASE_URL}/report/download?dir=<reportDir>`);
+    console.log(
+      `⬇️ 下載 API：${process.env.PUBLIC_BASE_URL}/report/download?dir=<reportDir>`
+    );
   }
 });
 
