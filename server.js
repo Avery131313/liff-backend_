@@ -1,4 +1,5 @@
 // server.js
+const axios = require("axios");
 const express = require("express");
 const cors = require("cors");
 const bodyParser = require("body-parser");
@@ -124,6 +125,21 @@ async function startReport(event, category) {
   });
 }
 
+async function notifyDownloadAgent({ url, filename, category }) {
+  const hook = process.env.DOWNLOAD_WEBHOOK_URL; // 例如 https://xxxxx.ngrok.io/hook
+  if (!hook) return;
+  try {
+    await axios.post(hook, { url, filename, category }, {
+      headers: { "Content-Type": "application/json", "X-Auth-Token": process.env.DOWNLOAD_WEBHOOK_TOKEN || "" },
+      timeout: 10000
+    });
+    console.log("📨 已通知本機下載器：", hook);
+  } catch (e) {
+    console.error("❌ 通知本機下載器失敗：", e?.response?.status, e?.response?.data || e.message);
+  }
+}
+
+
 
 async function finishIfReady(userId, replyToken) {
   const st = pendingReports.get(userId);
@@ -146,6 +162,10 @@ async function finishIfReady(userId, replyToken) {
     } else {
       await client.pushMessage(userId, { type: "text", text });
     }
+    const url = await zipToPublic(st.reportDir, st.folderName);
+// 新增這一行：把連結送去你的本機下載器
+    await notifyDownloadAgent({ url, filename: `${st.folderName}.zip`, category: st.category });
+
     return true;
   }
   return false;
