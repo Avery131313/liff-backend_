@@ -4,6 +4,7 @@ const cors = require("cors");
 const line = require("@line/bot-sdk");
 const haversine = require("haversine-distance");
 const { google } = require("googleapis");
+const { Readable } = require("stream");
 
 const app = express();
 
@@ -28,27 +29,19 @@ const dangerZone = { lat: 25.01528, lng: 121.5474, radius: 500 };
 const pushableUsers = new Map(); // userId => lastTs
 
 /* ========================= Google Drive ========================= */
-/** 必填環境變數：GOOGLE_DRIVE_SERVICE_ACCOUNT（JSON 或 base64）、BEE_FOLDER_ID、HIVE_FOLDER_ID */
-const BEE_FOLDER_ID = process.env.BEE_FOLDER_ID;
-const HIVE_FOLDER_ID = process.env.HIVE_FOLDER_ID;
+const BEE_FOLDER_ID = process.env.BEE_FOLDER_ID;   // Drive「疑似蜜蜂」資料夾 ID
+const HIVE_FOLDER_ID = process.env.HIVE_FOLDER_ID; // Drive「疑似蜂巢」資料夾 ID
 
 function loadServiceAccount() {
   const raw = process.env.GOOGLE_DRIVE_SERVICE_ACCOUNT;
   if (!raw) throw new Error("GOOGLE_DRIVE_SERVICE_ACCOUNT is missing");
 
-  // 先嘗試 JSON
-  try {
-    return JSON.parse(raw);
-  } catch {}
-
-  // 再嘗試 base64 -> JSON
+  try { return JSON.parse(raw); } catch {}
   try {
     const decoded = Buffer.from(raw, "base64").toString("utf8");
     return JSON.parse(decoded);
   } catch {
-    throw new Error(
-      "Invalid GOOGLE_DRIVE_SERVICE_ACCOUNT: not valid JSON or base64 JSON"
-    );
+    throw new Error("Invalid GOOGLE_DRIVE_SERVICE_ACCOUNT: not valid JSON or base64 JSON");
   }
 }
 
@@ -59,6 +52,14 @@ function getDriveClient() {
     scopes: ["https://www.googleapis.com/auth/drive.file"],
   });
   return google.drive({ version: "v3", auth });
+}
+
+function toReadable(body) {
+  if (!body) return Readable.from(Buffer.from(""));
+  if (typeof body === "string") return Readable.from(body);
+  if (Buffer.isBuffer(body)) return Readable.from(body);
+  if (typeof body.pipe === "function") return body; // already stream
+  return Readable.from(JSON.stringify(body));
 }
 
 async function createDriveFolder(parentId, name) {
@@ -73,7 +74,7 @@ async function createDriveFolder(parentId, name) {
       fields: "id,name",
       supportsAllDrives: true,
     });
-    return res.data; // { id, name }
+    return res.data;
   } catch (e) {
     console.error("❌ createDriveFolder error:", e.response?.data || e);
     throw e;
@@ -85,11 +86,11 @@ async function uploadToDrive(folderId, fileName, mimeType, body) {
     const drive = getDriveClient();
     const res = await drive.files.create({
       requestBody: { name: fileName, parents: [folderId] },
-      media: { mimeType, body },
+      media: { mimeType, body: toReadable(body) },
       fields: "id,name",
       supportsAllDrives: true,
     });
-    return res.data; // { id, name }
+    return res.data;
   } catch (e) {
     console.error("❌ uploadToDrive error:", e.response?.data || e);
     throw e;
@@ -116,7 +117,6 @@ async function makeFilePublic(fileId) {
   }
 }
 
-/** 啟動時自檢：確認資料夾存在且可寫入（建立→刪除一個測試檔） */
 async function validateDriveAccess() {
   if (!BEE_FOLDER_ID || !HIVE_FOLDER_ID) {
     throw new Error("BEE_FOLDER_ID / HIVE_FOLDER_ID is missing");
@@ -126,17 +126,14 @@ async function validateDriveAccess() {
     ["BEE_FOLDER_ID", BEE_FOLDER_ID],
     ["HIVE_FOLDER_ID", HIVE_FOLDER_ID],
   ]) {
-    // 看得到
     await drive.files.get({
       fileId: folderId,
       fields: "id,name",
       supportsAllDrives: true,
     });
-
-    // 可寫入（寫一個 temp 檔，再刪掉）
     const tmp = await drive.files.create({
       requestBody: { name: `__probe_${Date.now()}.txt`, parents: [folderId] },
-      media: { mimeType: "text/plain", body: Buffer.from("ok") },
+      media: { mimeType: "text/plain", body: Readable.from("ok") },
       fields: "id",
       supportsAllDrives: true,
     });
@@ -274,7 +271,7 @@ app.post(
             if (!st) continue;
 
             try {
-              const stream = await client.getMessageContent(msg.id);
+              const stream = await client.getMessageContent(msg.id); // Readable
               await uploadToDrive(st.driveFolderId, "image.jpg", "image/jpeg", stream);
               st.hasPhoto = true;
 
@@ -414,14 +411,12 @@ app.listen(PORT, async () => {
   console.log(`✅ Server running on port ${PORT}`);
 
   try {
-    // 啟動時先檢查 Drive 設定與權限
     await validateDriveAccess();
     console.log("🟢 Google Drive folders are accessible & writable.");
   } catch (e) {
     console.error("🔴 Drive setup/permission problem:", e.response?.data || e);
     console.error(
-      "請檢查：1) GOOGLE_DRIVE_SERVICE_ACCOUNT JSON 是否正確；2) BEE_FOLDER_ID/HIVE_FOLDER_ID 是否正確的資料夾 ID；3) 服務帳號 email 是否有資料夾『編輯者』權限。"
+      "請檢查：1) GOOGLE_DRIVE_SERVICE_ACCOUNT JSON 是否正確（或 base64）；2) BEE_FOLDER_ID/HIVE_FOLDER_ID 是否正確；3) 服務帳號 email 是否對資料夾有『編輯者』權限。"
     );
   }
 });
-
