@@ -1,14 +1,13 @@
+// server.js
 const express = require("express");
 const cors = require("cors");
 const line = require("@line/bot-sdk");
 const haversine = require("haversine-distance");
-const fs = require("fs"); // 只剩零星用途
-const path = require("path");
 const { google } = require("googleapis");
 
 const app = express();
 
-// ✅ CORS（不會改動 body）
+/* ========================= 基本設定 ========================= */
 app.use(
   cors({
     origin: "*",
@@ -17,27 +16,44 @@ app.use(
   })
 );
 
-// ===== LINE 基本設定 =====
+// LINE Bot
 const config = {
   channelAccessToken: process.env.CHANNEL_ACCESS_TOKEN,
   channelSecret: process.env.CHANNEL_SECRET,
 };
 const client = new line.Client(config);
 
-// ===== 危險區域 & 推播暫存（沿用你的原功能） =====
+// 危險區與推播暫存（保留原功能）
 const dangerZone = { lat: 25.01528, lng: 121.5474, radius: 500 };
 const pushableUsers = new Map(); // userId => lastTs
 
-// ===== Google Drive：服務帳號、根資料夾 =====
-const SERVICE_ACCOUNT_JSON = process.env.GOOGLE_DRIVE_SERVICE_ACCOUNT; // 服務帳號 JSON 內容（整段放進 env）
-const BEE_FOLDER_ID = process.env.BEE_FOLDER_ID;   // Drive 上的「疑似蜜蜂」資料夾ID
-const HIVE_FOLDER_ID = process.env.HIVE_FOLDER_ID; // Drive 上的「疑似蜂巢」資料夾ID
+/* ========================= Google Drive ========================= */
+/** 必填環境變數：GOOGLE_DRIVE_SERVICE_ACCOUNT（JSON 或 base64）、BEE_FOLDER_ID、HIVE_FOLDER_ID */
+const BEE_FOLDER_ID = process.env.BEE_FOLDER_ID;
+const HIVE_FOLDER_ID = process.env.HIVE_FOLDER_ID;
+
+function loadServiceAccount() {
+  const raw = process.env.GOOGLE_DRIVE_SERVICE_ACCOUNT;
+  if (!raw) throw new Error("GOOGLE_DRIVE_SERVICE_ACCOUNT is missing");
+
+  // 先嘗試 JSON
+  try {
+    return JSON.parse(raw);
+  } catch {}
+
+  // 再嘗試 base64 -> JSON
+  try {
+    const decoded = Buffer.from(raw, "base64").toString("utf8");
+    return JSON.parse(decoded);
+  } catch {
+    throw new Error(
+      "Invalid GOOGLE_DRIVE_SERVICE_ACCOUNT: not valid JSON or base64 JSON"
+    );
+  }
+}
 
 function getDriveClient() {
-  if (!SERVICE_ACCOUNT_JSON || !BEE_FOLDER_ID || !HIVE_FOLDER_ID) {
-    console.error("❌ 缺少 GOOGLE_DRIVE_SERVICE_ACCOUNT / BEE_FOLDER_ID / HIVE_FOLDER_ID");
-  }
-  const credentials = JSON.parse(SERVICE_ACCOUNT_JSON);
+  const credentials = loadServiceAccount();
   const auth = new google.auth.GoogleAuth({
     credentials,
     scopes: ["https://www.googleapis.com/auth/drive.file"],
@@ -46,49 +62,90 @@ function getDriveClient() {
 }
 
 async function createDriveFolder(parentId, name) {
-  const drive = getDriveClient();
-  const res = await drive.files.create({
-    requestBody: {
-      name,
-      mimeType: "application/vnd.google-apps.folder",
-      parents: [parentId],
-    },
-    fields: "id, name",
-  });
-  return res.data; // { id, name }
+  try {
+    const drive = getDriveClient();
+    const res = await drive.files.create({
+      requestBody: {
+        name,
+        mimeType: "application/vnd.google-apps.folder",
+        parents: [parentId],
+      },
+      fields: "id,name",
+      supportsAllDrives: true,
+    });
+    return res.data; // { id, name }
+  } catch (e) {
+    console.error("❌ createDriveFolder error:", e.response?.data || e);
+    throw e;
+  }
 }
 
-async function uploadToDrive(folderId, fileName, mimeType, bodyStreamOrBuffer) {
-  const drive = getDriveClient();
-  const res = await drive.files.create({
-    requestBody: {
-      name: fileName,
-      parents: [folderId],
-    },
-    media: {
-      mimeType,
-      body: bodyStreamOrBuffer,
-    },
-    fields: "id, name",
-  });
-  return res.data; // { id, name }
+async function uploadToDrive(folderId, fileName, mimeType, body) {
+  try {
+    const drive = getDriveClient();
+    const res = await drive.files.create({
+      requestBody: { name: fileName, parents: [folderId] },
+      media: { mimeType, body },
+      fields: "id,name",
+      supportsAllDrives: true,
+    });
+    return res.data; // { id, name }
+  } catch (e) {
+    console.error("❌ uploadToDrive error:", e.response?.data || e);
+    throw e;
+  }
 }
 
 async function makeFilePublic(fileId) {
-  const drive = getDriveClient();
-  // 設定任何人可讀
-  await drive.permissions.create({
-    fileId,
-    requestBody: { role: "reader", type: "anyone" },
-  });
-  const f = await drive.files.get({
-    fileId,
-    fields: "webViewLink, webContentLink",
-  });
-  return f.data.webViewLink; // 可瀏覽的連結（資料夾/檔案）
+  try {
+    const drive = getDriveClient();
+    await drive.permissions.create({
+      fileId,
+      requestBody: { role: "reader", type: "anyone" },
+      supportsAllDrives: true,
+    });
+    const f = await drive.files.get({
+      fileId,
+      fields: "webViewLink",
+      supportsAllDrives: true,
+    });
+    return f.data.webViewLink;
+  } catch (e) {
+    console.error("❌ makeFilePublic error:", e.response?.data || e);
+    throw e;
+  }
 }
 
-// ===== 回報流程暫存 =====
+/** 啟動時自檢：確認資料夾存在且可寫入（建立→刪除一個測試檔） */
+async function validateDriveAccess() {
+  if (!BEE_FOLDER_ID || !HIVE_FOLDER_ID) {
+    throw new Error("BEE_FOLDER_ID / HIVE_FOLDER_ID is missing");
+  }
+  const drive = getDriveClient();
+  for (const [label, folderId] of [
+    ["BEE_FOLDER_ID", BEE_FOLDER_ID],
+    ["HIVE_FOLDER_ID", HIVE_FOLDER_ID],
+  ]) {
+    // 看得到
+    await drive.files.get({
+      fileId: folderId,
+      fields: "id,name",
+      supportsAllDrives: true,
+    });
+
+    // 可寫入（寫一個 temp 檔，再刪掉）
+    const tmp = await drive.files.create({
+      requestBody: { name: `__probe_${Date.now()}.txt`, parents: [folderId] },
+      media: { mimeType: "text/plain", body: Buffer.from("ok") },
+      fields: "id",
+      supportsAllDrives: true,
+    });
+    await drive.files.delete({ fileId: tmp.data.id, supportsAllDrives: true });
+    console.log(`✅ Drive access OK for ${label}`);
+  }
+}
+
+/* ========================= 回報流程暫存 ========================= */
 // userId => { category: '疑似蜜蜂'|'疑似蜂巢', driveFolderId, folderLink, hasPhoto, hasLocation }
 const pendingReports = new Map();
 
@@ -110,24 +167,24 @@ async function startReport(event, category) {
     return;
   }
 
-  // 在對應的雲端父資料夾下建立一個子資料夾（時間戳_使用者ID）
   const parentId = category === "疑似蜜蜂" ? BEE_FOLDER_ID : HIVE_FOLDER_ID;
   const folderName = `${ts()}_${userId}`;
   const folder = await createDriveFolder(parentId, folderName);
-
-  // 讓資料夾可分享（取得連結）
   const folderLink = await makeFilePublic(folder.id);
 
-  // name.txt：LINE displayName
+  // name.txt
   try {
     const profile = await client.getProfile(userId);
-    const nameBuf = Buffer.from(profile?.displayName ?? "", "utf8");
-    await uploadToDrive(folder.id, "name.txt", "text/plain", nameBuf);
+    await uploadToDrive(
+      folder.id,
+      "name.txt",
+      "text/plain",
+      Buffer.from(profile?.displayName ?? "", "utf8")
+    );
   } catch {
     await uploadToDrive(folder.id, "name.txt", "text/plain", Buffer.from("", "utf8"));
   }
 
-  // 建立狀態
   pendingReports.set(userId, {
     category,
     driveFolderId: folder.id,
@@ -158,7 +215,7 @@ async function finishIfReady(userId, replyToken) {
   return false;
 }
 
-// ========== Webhook：必須是 raw body，才能通過 LINE 驗簽 ==========
+/* ========================= Webhook（raw body 驗簽） ========================= */
 app.post(
   "/webhook",
   express.raw({ type: "*/*" }),
@@ -169,11 +226,10 @@ app.post(
       for (const event of events) {
         try {
           if (event.type !== "message") continue;
-
           const userId = event.source?.userId;
           const msg = event.message;
 
-          // ---- 文字：原有兩個指令；其餘不回覆 ----
+          // 文字（保留原功能 + 新增回報啟動）
           if (msg.type === "text") {
             const text = (msg.text || "").trim();
 
@@ -202,7 +258,6 @@ app.post(
               continue;
             }
 
-            // 【新增】啟動回報（雲端）
             if (text === "發現疑似蜜蜂" || text === "發現疑似蜂巢") {
               const category = text.includes("蜜蜂") ? "疑似蜜蜂" : "疑似蜂巢";
               await startReport(event, category);
@@ -213,17 +268,16 @@ app.post(
             continue;
           }
 
-          // ---- 圖片：僅回報模式→直接上傳到 Google Drive ----
+          // 圖片：回報模式→直接上傳 Drive
           if (msg.type === "image") {
             const st = pendingReports.get(userId);
             if (!st) continue;
 
             try {
               const stream = await client.getMessageContent(msg.id);
-              // 直接把 LINE 的 stream 丟給 Google API（可接受 stream）
               await uploadToDrive(st.driveFolderId, "image.jpg", "image/jpeg", stream);
-
               st.hasPhoto = true;
+
               const done = await finishIfReady(userId, event.replyToken);
               if (!done) {
                 await client.replyMessage(event.replyToken, {
@@ -232,7 +286,7 @@ app.post(
                 });
               }
             } catch (err) {
-              console.error("❌ 圖片上傳失敗：", err);
+              console.error("❌ 圖片上傳失敗：", err.response?.data || err);
               await client.replyMessage(event.replyToken, {
                 type: "text",
                 text: "抱歉，圖片上傳失敗。",
@@ -241,17 +295,21 @@ app.post(
             continue;
           }
 
-          // ---- LINE 位置訊息：回報模式→上傳 location.txt ----
+          // 位置：回報模式→上傳 location.txt
           if (msg.type === "location") {
             const st = pendingReports.get(userId);
             if (!st) continue;
 
             try {
               const locStr = `${msg.latitude},${msg.longitude}`;
-              const buf = Buffer.from(locStr, "utf8");
-              await uploadToDrive(st.driveFolderId, "location.txt", "text/plain", buf);
-
+              await uploadToDrive(
+                st.driveFolderId,
+                "location.txt",
+                "text/plain",
+                Buffer.from(locStr, "utf8")
+              );
               st.hasLocation = true;
+
               const done = await finishIfReady(userId, event.replyToken);
               if (!done) {
                 await client.replyMessage(event.replyToken, {
@@ -260,7 +318,7 @@ app.post(
                 });
               }
             } catch (err) {
-              console.error("❌ 位置上傳失敗：", err);
+              console.error("❌ 位置上傳失敗：", err.response?.data || err);
               await client.replyMessage(event.replyToken, {
                 type: "text",
                 text: "抱歉，儲存定位失敗。",
@@ -269,7 +327,7 @@ app.post(
             continue;
           }
 
-          // 其他型別：忽略
+          // 其它型別：忽略
         } catch (e) {
           console.error("❌ webhook 單一事件錯誤：", e);
         }
@@ -282,7 +340,7 @@ app.post(
   }
 );
 
-// ========== /location：只在這條掛 JSON 解析；同時維持你原本的危險區推播 ==========
+/* ========================= /location（原功能+雲端定位） ========================= */
 app.post("/location", express.json(), async (req, res) => {
   const { userId, latitude, longitude } = req.body;
 
@@ -291,7 +349,7 @@ app.post("/location", express.json(), async (req, res) => {
     return res.status(400).send("Missing fields");
   }
 
-  // 原功能：危險區推播 + 15 秒冷卻
+  // 原：危險區推播 + 15 秒冷卻
   const userLoc = { lat: latitude, lng: longitude };
   const zoneLoc = { lat: dangerZone.lat, lng: dangerZone.lng };
   const distance = haversine(userLoc, zoneLoc);
@@ -316,15 +374,19 @@ app.post("/location", express.json(), async (req, res) => {
     }
   }
 
-  // 回報模式：把定位上傳到雲端
+  // 新：回報模式→上傳定位
   const st = pendingReports.get(userId);
   if (st) {
     try {
       const locStr = `${latitude},${longitude}`;
-      const buf = Buffer.from(locStr, "utf8");
-      await uploadToDrive(st.driveFolderId, "location.txt", "text/plain", buf);
-
+      await uploadToDrive(
+        st.driveFolderId,
+        "location.txt",
+        "text/plain",
+        Buffer.from(locStr, "utf8")
+      );
       st.hasLocation = true;
+
       const done = st.hasPhoto && st.hasLocation;
       if (done) {
         pendingReports.delete(userId);
@@ -339,15 +401,27 @@ app.post("/location", express.json(), async (req, res) => {
         });
       }
     } catch (err) {
-      console.error("❌ 位置上傳失敗（/location）：", err);
+      console.error("❌ 位置上傳失敗（/location）：", err.response?.data || err);
     }
   }
 
   res.sendStatus(200);
 });
 
-// ✅ 啟動伺服器
+/* ========================= 啟動 & 啟動前自檢 ========================= */
 const PORT = process.env.PORT || 10000;
-app.listen(PORT, () => {
+app.listen(PORT, async () => {
   console.log(`✅ Server running on port ${PORT}`);
+
+  try {
+    // 啟動時先檢查 Drive 設定與權限
+    await validateDriveAccess();
+    console.log("🟢 Google Drive folders are accessible & writable.");
+  } catch (e) {
+    console.error("🔴 Drive setup/permission problem:", e.response?.data || e);
+    console.error(
+      "請檢查：1) GOOGLE_DRIVE_SERVICE_ACCOUNT JSON 是否正確；2) BEE_FOLDER_ID/HIVE_FOLDER_ID 是否正確的資料夾 ID；3) 服務帳號 email 是否有資料夾『編輯者』權限。"
+    );
+  }
 });
+
