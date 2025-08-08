@@ -19,17 +19,15 @@ app.use(
     allowedHeaders: ["Content-Type", "X-Line-Signature"],
   })
 );
-// 別在全域掛 JSON（避免破壞 LINE 驗簽）
+// 千萬不要在全域掛 JSON（避免破壞 LINE 驗簽）
 // app.use(bodyParser.json());
 
 /* ============ 可下載目錄（Render 可寫：/tmp） ============ */
-function ensureDir(dir) {
-  try { fs.mkdirSync(dir, { recursive: true }); } catch {}
-}
+function ensureDir(dir) { try { fs.mkdirSync(dir, { recursive: true }); } catch {} }
 const REPORTS_DIR = path.join(os.tmpdir(), "reports");
 ensureDir(REPORTS_DIR);
 
-// 將 /tmp/reports 以 /reports 對外提供靜態下載（處理中文檔名）
+// 讓 /reports 指向 /tmp/reports（處理中文檔名 OK）
 app.use("/reports", express.static(REPORTS_DIR, { fallthrough: false }));
 
 /* ============ LINE Bot 設定 ============ */
@@ -56,14 +54,14 @@ function ts() {
   )}${p(d.getMinutes())}${p(d.getSeconds())}`;
 }
 function getBaseUrl() {
-  // Render 會提供 RENDER_EXTERNAL_URL；也可自行設 PUBLIC_BASE_URL
+  // Render 會提供 RENDER_EXTERNAL_URL；你也可自行設 PUBLIC_BASE_URL
   return process.env.PUBLIC_BASE_URL || process.env.RENDER_EXTERNAL_URL || "";
 }
 
-// 壓縮 reportDir 到 /tmp/reports/<zipBaseName>.zip，回傳可直接下載的完整 URL
+// 壓縮 reportDir 到 /tmp/reports/<zipBaseName>.zip，回傳完整 URL（但我們只 log 不回給用戶）
 async function zipToPublic(reportDir, zipBaseName) {
   const safeBase = (zipBaseName || "report").replace(/[\\/:*?"<>|]/g, "_");
-  const zipFilename = `${safeBase}.zip`;                    // 寫到檔案系統的檔名（保持中文）
+  const zipFilename = `${safeBase}.zip`;               // 檔案系統上保留中文檔名
   const zipPath = path.join(REPORTS_DIR, zipFilename);
 
   try { if (fs.existsSync(zipPath)) fs.unlinkSync(zipPath); } catch {}
@@ -78,11 +76,11 @@ async function zipToPublic(reportDir, zipBaseName) {
     archive.finalize();
   });
 
-  // URL 需對檔名做 URL encode，避免中文/空白問題
   const encoded = encodeURIComponent(zipFilename);
   const base = getBaseUrl();
   const url = (base ? `${base}` : "") + `/reports/${encoded}`;
-  console.log("✅ ZIP created:", zipPath, "→ URL:", url);
+  console.log("✅ ZIP created:", zipPath);
+  console.log("🔗 下載連結（後台用）：", url);
   return url;
 }
 
@@ -90,22 +88,17 @@ async function zipToPublic(reportDir, zipBaseName) {
 async function startReport(event, category) {
   const userId = event.source?.userId;
   if (!userId) {
-    await client.replyMessage(event.replyToken, {
-      type: "text",
-      text: "無法取得使用者資訊。",
-    });
+    await client.replyMessage(event.replyToken, { type: "text", text: "無法取得使用者資訊。" });
     return;
   }
 
-  // 先拿顯示名稱，組資料夾名：YYYYMMDD_HHMMSS_顯示名稱（非法字元 → _）
+  // 顯示名稱 → 資料夾名：YYYYMMDD_HHMMSS_顯示名稱（非法字元 → _）
   let displayName = null;
   try {
     const profile = await client.getProfile(userId);
     displayName = (profile?.displayName || "").trim();
   } catch {}
-  const safeName =
-    (displayName && displayName.replace(/[\\/:*?"<>|]/g, "_").trim()) ||
-    userId;
+  const safeName = (displayName && displayName.replace(/[\\/:*?"<>|]/g, "_").trim()) || userId;
 
   // 父目錄：./疑似蜜蜂 或 ./疑似蜂巢（存在於容器本機，暫存）
   const baseDir = path.join(__dirname, category);
@@ -116,13 +109,9 @@ async function startReport(event, category) {
   const reportDir = path.join(baseDir, folderName);
   ensureDir(reportDir);
 
-  // name.txt（仍存真正顯示名稱；取不到就空字串）
+  // name.txt（真正顯示名稱；取不到就空字串）
   try {
-    fs.writeFileSync(
-      path.join(reportDir, "name.txt"),
-      displayName ?? "",
-      "utf8"
-    );
+    fs.writeFileSync(path.join(reportDir, "name.txt"), displayName ?? "", "utf8");
   } catch (e) {
     console.error("寫入 name.txt 失敗：", e);
   }
@@ -142,7 +131,7 @@ async function startReport(event, category) {
   });
 }
 
-/* ============ 完成檢查（完成即產生 ZIP 連結） ============ */
+/* ============ 完成檢查（完成即生成 ZIP，連結只寫 Logs） ============ */
 async function finishIfReady(userId, replyToken) {
   const st = pendingReports.get(userId);
   if (!st) return false;
@@ -150,15 +139,15 @@ async function finishIfReady(userId, replyToken) {
   if (st.hasPhoto && st.hasLocation) {
     pendingReports.delete(userId);
 
-    let text;
     try {
       const url = await zipToPublic(st.reportDir, st.folderName);
-      text = `📦 已完成存檔（照片＋定位＋名稱）。\n\n⬇️ 直接下載 ZIP：\n${url}`;
+      // 後台可見連結，前端用戶不會看到
+      console.log(`📦「${st.category}」完成，下載：${url}`);
     } catch (e) {
       console.error("壓縮/產出下載連結失敗：", e);
-      text = `📦 已完成存檔（照片＋定位＋名稱）。\n（ZIP 生成失敗，可稍後再試）`;
     }
 
+    const text = `📦「${st.category}」已完成存檔（照片＋定位＋名稱）。`;
     if (replyToken) {
       await client.replyMessage(replyToken, { type: "text", text });
     } else {
@@ -192,20 +181,14 @@ app.post("/webhook", line.middleware(config), async (req, res) => {
                 text: "✅ 你已成功啟用追蹤通知，請開啟 LIFF 畫面開始定位。",
               });
             } else {
-              await client.replyMessage(event.replyToken, {
-                type: "text",
-                text: "🔁 你已經啟用過追蹤通知。",
-              });
+              await client.replyMessage(event.replyToken, { type: "text", text: "🔁 你已經啟用過追蹤通知。" });
             }
             continue;
           }
 
           if (text === "關閉追蹤") {
             pushableUsers.delete(userId);
-            await client.replyMessage(event.replyToken, {
-              type: "text",
-              text: "🛑 你已關閉追蹤功能。",
-            });
+            await client.replyMessage(event.replyToken, { type: "text", text: "🛑 你已關閉追蹤功能。" });
             continue;
           }
 
@@ -238,17 +221,11 @@ app.post("/webhook", line.middleware(config), async (req, res) => {
             st.hasPhoto = true;
             const done = await finishIfReady(userId, event.replyToken);
             if (!done) {
-              await client.replyMessage(event.replyToken, {
-                type: "text",
-                text: "✅ 照片已儲存，請再分享定位。",
-              });
+              await client.replyMessage(event.replyToken, { type: "text", text: "✅ 照片已儲存，請再分享定位。" });
             }
           } catch (err) {
             console.error("❌ 圖片存檔失敗：", err);
-            await client.replyMessage(event.replyToken, {
-              type: "text",
-              text: "抱歉，圖片儲存失敗。",
-            });
+            await client.replyMessage(event.replyToken, { type: "text", text: "抱歉，圖片儲存失敗。" });
           }
           continue;
         }
@@ -260,26 +237,16 @@ app.post("/webhook", line.middleware(config), async (req, res) => {
 
           try {
             const locStr = `${msg.latitude},${msg.longitude}`;
-            fs.writeFileSync(
-              path.join(st.reportDir, "location.txt"),
-              locStr,
-              "utf8"
-            );
+            fs.writeFileSync(path.join(st.reportDir, "location.txt"), locStr, "utf8");
             st.hasLocation = true;
 
             const done = await finishIfReady(userId, event.replyToken);
             if (!done) {
-              await client.replyMessage(event.replyToken, {
-                type: "text",
-                text: "✅ 已收到定位，請再上傳照片。",
-              });
+              await client.replyMessage(event.replyToken, { type: "text", text: "✅ 已收到定位，請再上傳照片。" });
             }
           } catch (err) {
             console.error("❌ 寫定位失敗：", err);
-            await client.replyMessage(event.replyToken, {
-              type: "text",
-              text: "抱歉，儲存定位失敗。",
-            });
+            await client.replyMessage(event.replyToken, { type: "text", text: "抱歉，儲存定位失敗。" });
           }
           continue;
         }
@@ -317,10 +284,7 @@ app.post("/location", bodyParser.json(), async (req, res) => {
     const last = pushableUsers.get(userId) || 0;
     if (now - last >= 15 * 1000) {
       try {
-        await client.pushMessage(userId, {
-          type: "text",
-          text: "⚠️ 警告：您已進入危險區域，請注意安全！",
-        });
+        await client.pushMessage(userId, { type: "text", text: "⚠️ 警告：您已進入危險區域，請注意安全！" });
         pushableUsers.set(userId, now);
       } catch (err) {
         console.error("❌ 推播失敗：", err.originalError?.response?.data || err);
@@ -330,7 +294,7 @@ app.post("/location", bodyParser.json(), async (req, res) => {
     }
   }
 
-  // 回報模式：寫入 location.txt；若完成→產出 ZIP 連結（/reports/xxx.zip）
+  // 回報模式：寫入 location.txt；若完成→產出 ZIP（只寫 Logs）
   const st = pendingReports.get(userId);
   if (st) {
     try {
@@ -342,22 +306,14 @@ app.post("/location", bodyParser.json(), async (req, res) => {
         pendingReports.delete(userId);
         try {
           const url = await zipToPublic(st.reportDir, st.folderName);
-          await client.pushMessage(userId, {
-            type: "text",
-            text: `📦 已完成存檔（照片＋定位＋名稱）。\n\n⬇️ 直接下載 ZIP：\n${url}`,
-          });
+          console.log(`📦「${st.category}」完成，下載：${url}`);
+          await client.pushMessage(userId, { type: "text", text: `📦「${st.category}」已完成存檔（照片＋定位＋名稱）。` });
         } catch (e) {
           console.error("壓縮/產出下載連結失敗（/location 完成）：", e);
-          await client.pushMessage(userId, {
-            type: "text",
-            text: "📦 已完成存檔，但 ZIP 生成失敗，可稍後再試。",
-          });
+          await client.pushMessage(userId, { type: "text", text: "📦 已完成存檔，但 ZIP 生成失敗，可稍後再試。" });
         }
       } else {
-        await client.pushMessage(userId, {
-          type: "text",
-          text: "✅ 已收到定位，請再上傳照片。",
-        });
+        await client.pushMessage(userId, { type: "text", text: "✅ 已收到定位，請再上傳照片。" });
       }
     } catch (err) {
       console.error("❌ 寫定位失敗（/location）：", err);
@@ -375,6 +331,6 @@ app.listen(PORT, () => {
   if (base) {
     console.log(`🔗 ZIP 靜態下載根路徑：${base}/reports/<檔名>.zip`);
   } else {
-    console.log("ℹ️ 建議設定 PUBLIC_BASE_URL（或用 Render 內建 RENDER_EXTERNAL_URL）以便回傳完整下載連結。");
+    console.log("ℹ️ 建議設定 PUBLIC_BASE_URL（或用 Render 內建 RENDER_EXTERNAL_URL）以便在 Logs 顯示完整下載連結。");
   }
 });
