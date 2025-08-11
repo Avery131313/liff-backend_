@@ -1,4 +1,3 @@
-// server.js — 不改資料庫版本：DB 只做外接矩形粗篩，Node 端 haversine 計算 500m
 // 功能：info.txt（name/lat/lng/date/time/notes）+ image.jpg + ZIP + 後台下載 + 本機下載器通知 + /location 觸發危險提示
 const express = require("express");
 const cors = require("cors");
@@ -126,7 +125,7 @@ async function zipToPublic(reportDir, zipBaseName) {
   return url;
 }
 
-/* ====== 通知你的本機下載器（ngrok webhook）====== */
+/* ====== 通知本機下載器（ngrok webhook）====== */
 async function notifyDownloadAgent({ url, filename, category }) {
   const hook = process.env.DOWNLOAD_WEBHOOK_URL; // 例: https://<ngrok>/hook
   if (!hook) return;
@@ -152,11 +151,7 @@ async function notifyDownloadAgent({ url, filename, category }) {
   }
 }
 
-/* ====== 危險區判斷（不改資料庫版本）====== */
-/**
- * 只用 DB 做外接矩形粗篩，再在 Node 端對每筆做 haversine 距離（半徑預設 500m）
- * 回傳：true/false；若 DB 查詢失敗回傳 null（上層會走 fallback）
- */
+/* ====== 危險區判斷====== */
 async function isInDangerByDB(lat, lng, radiusMeters = 500) {
   const { dLat, dLng } = metersToLatLngDelta(lat, radiusMeters);
   const latMin = lat - dLat;
@@ -255,7 +250,7 @@ async function startReport(event, category) {
   await client.replyMessage(event.replyToken, {
     type: "text",
     text:
-      "已建立回報，請依序上傳：\n1) 照片\n2) 位置（LINE 位置訊息或 LIFF）\n3) 備註：直接輸入文字訊息即可（例如：在學校門口發現）",
+      "已建立回報，請依序上傳：\n1) 照片\n2) 備註：直接輸入文字訊息即可（例如：在學校門口發現）\n3) 位置（LINE 位置訊息）",
   });
 }
 
@@ -328,7 +323,7 @@ app.post("/webhook", line.middleware(config), async (req, res) => {
               pushableUsers.set(userId, 0);
               await client.replyMessage(event.replyToken, {
                 type: "text",
-                text: "✅ 你已成功啟用追蹤通知，請打開 LIFF 畫面開始定位。",
+                text: "✅ 你已成功啟用追蹤通知，請打開連結開始定位。",
               });
             } else {
               await client.replyMessage(event.replyToken, {
@@ -364,7 +359,7 @@ app.post("/webhook", line.middleware(config), async (req, res) => {
             if (!done) {
               await client.replyMessage(event.replyToken, {
                 type: "text",
-                text: "📝 備註已記錄，請繼續提供照片與位置（若尚未提供）。",
+                text: "📝 備註已記錄，請繼續提供位置。",
               });
             }
             continue;
@@ -393,7 +388,7 @@ app.post("/webhook", line.middleware(config), async (req, res) => {
             if (!done) {
               await client.replyMessage(event.replyToken, {
                 type: "text",
-                text: "✅ 照片已儲存，請再分享定位與備註（若尚未提供）。",
+                text: "✅ 照片已儲存，請再分享備註與定位。",
               });
             }
           } catch (err) {
@@ -407,9 +402,6 @@ app.post("/webhook", line.middleware(config), async (req, res) => {
         }
 
         if (msg.type === "location") {
-          // 注意：這裡現在只做「回報流程」的資料記錄，不做危險提示
-          // 如果你之後想讓「聊天室位置訊息」也觸發危險提示，
-          // 請把 /location 的危險判斷那段複製到這裡。
           const st = pendingReports.get(userId);
           if (!st) continue;
 
@@ -422,7 +414,7 @@ app.post("/webhook", line.middleware(config), async (req, res) => {
             if (!done) {
               await client.replyMessage(event.replyToken, {
                 type: "text",
-                text: "✅ 已收到定位，請提供照片與備註（若尚未提供）。",
+                text: "✅ 已收到定位。",
               });
             }
           } catch (err) {
@@ -479,7 +471,7 @@ app.post("/location", bodyParser.json(), async (req, res) => {
       try {
         await client.pushMessage(userId, {
           type: "text",
-          text: `⚠️ 警告：您已進入危險區域（500 公尺內），請注意安全！`,
+          text: `⚠️ 警告：您已進入危險區域，請注意安全！`,
         });
         pushableUsers.set(userId, now);
         console.log("✅ 推播成功");
@@ -525,7 +517,7 @@ app.post("/location", bodyParser.json(), async (req, res) => {
       } else {
         await client.pushMessage(userId, {
           type: "text",
-          text: "✅ 已收到定位，請提供照片與備註（若尚未提供）。",
+          text: "✅ 已收到定位。",
         });
       }
     } catch (e) {
