@@ -1,4 +1,5 @@
-// server.js — 動態 DB（全歷史）500m 判斷 + 單一 info.txt（含 time）+ ZIP + 後台下載 + 本機下載器通知
+// server.js — 不改資料庫版本：DB 只做外接矩形粗篩，Node 端 haversine 計算 500m
+// 功能：info.txt（name/lat/lng/date/time/notes）+ image.jpg + ZIP + 後台下載 + 本機下載器通知 + /location 觸發危險提示
 const express = require("express");
 const cors = require("cors");
 const bodyParser = require("body-parser");
@@ -13,7 +14,7 @@ const mysql = require("mysql2/promise");
 
 const app = express();
 
-/* CORS（不要在 webhook 前掛全域 JSON 解析） */
+/* CORS（不要在 webhook 前面掛全域 JSON 解析） */
 app.use(
   cors({
     origin: "*",
@@ -34,16 +35,16 @@ const config = {
 };
 const client = new line.Client(config);
 
-/* 單一 fallback 危險區（DB 出錯時用） */
+/* fallback 危險點（DB 出錯時才會用到） */
 const fallbackZone = { lat: 25.01528, lng: 121.5474, radius: 500 };
 
-/* 推播冷卻記錄 */
-const pushableUsers = new Map(); // userId => lastTs
+/* 追蹤冷卻記錄（15 秒） */
+const pushableUsers = new Map(); // userId => lastTs(ms)
 
-/* 回報狀態：userId -> { category, reportDir, folderName, displayName, hasPhoto, hasLocation, hasNotes, lat, lng, notes } */
+/* 回報狀態：userId -> {...} */
 const pendingReports = new Map();
 
-/* MySQL 連線池（Render 以環境變數配置） */
+/* MySQL 連線池（請用環境變數設定） */
 const pool = mysql.createPool({
   host: process.env.DB_HOST,
   port: Number(process.env.DB_PORT || 3306),
@@ -58,55 +59,7 @@ const pool = mysql.createPool({
     : {}),
 });
 
-/* ===== 地理工具 ===== */
-function metersToLatLngDelta(latDeg, radiusMeters) {
-  const dLat = radiusMeters / 111320; // 1度緯度 ≈ 111,320m
-  const rad = (Math.PI / 180) * latDeg;
-  const metersPerDegLon = 111320 * Math.cos(rad || 1e-6);
-  const dLng = radiusMeters / metersPerDegLon;
-  return { dLat, dLng };
-}
-
-/* === 危險區判斷（動態 DB 查詢，全歷史，半徑 500m） === */
-async function isInDangerByDB(lat, lng, radiusMeters = 500) {
-  const { dLat, dLng } = metersToLatLngDelta(lat, radiusMeters);
-
-  const latMin = lat - dLat;
-  const latMax = lat + dLat;
-  const lngMin = lng - dLng;
-  const lngMax = lng + dLng;
-
-  // 先用 bounding box 粗篩，再用 ST_Distance_Sphere 精算
-  // 注意 POINT 的順序是 (longitude, latitude)
-  const sql = `
-    SELECT 1
-    FROM wasp_reports
-    WHERE latitude  IS NOT NULL
-      AND longitude IS NOT NULL
-      AND latitude  BETWEEN ? AND ?
-      AND longitude BETWEEN ? AND ?
-      AND ST_Distance_Sphere(
-            POINT(longitude, latitude),
-            POINT(?, ?)
-          ) <= ?
-    LIMIT 1
-  `;
-
-  try {
-    const [rows] = await pool.query(sql, [
-      latMin, latMax,
-      lngMin, lngMax,
-      lng, lat,
-      radiusMeters,
-    ]);
-    return rows.length > 0;
-  } catch (e) {
-    console.error("DB 危險區查詢失敗：", e.message);
-    return null; // 回上層用 fallback
-  }
-}
-
-/* ===== 小工具 ===== */
+/* ====== 共用小工具 ====== */
 function ts() {
   const d = new Date();
   const p = (n) => String(n).padStart(2, "0");
@@ -140,8 +93,15 @@ function nowTWParts() {
     time: `${get("hour")}:${get("minute")}:${get("second")}`, // HH:mm:ss
   };
 }
+function metersToLatLngDelta(latDeg, radiusMeters) {
+  const dLat = radiusMeters / 111320; // 1度緯度 ≈ 111,320m
+  const rad = (Math.PI / 180) * latDeg;
+  const metersPerDegLon = 111320 * Math.cos(rad || 1e-6);
+  const dLng = radiusMeters / metersPerDegLon;
+  return { dLat, dLng };
+}
 
-/* 壓 ZIP 並回傳公開下載連結 */
+/* ====== ZIP + 後台下載連結 ====== */
 async function zipToPublic(reportDir, zipBaseName) {
   const safeBase = (zipBaseName || "report").replace(/[\\/:*?"<>|]/g, "_");
   const zipFilename = `${safeBase}.zip`;
@@ -166,7 +126,7 @@ async function zipToPublic(reportDir, zipBaseName) {
   return url;
 }
 
-/* 通知本機下載器（ngrok） */
+/* ====== 通知你的本機下載器（ngrok webhook）====== */
 async function notifyDownloadAgent({ url, filename, category }) {
   const hook = process.env.DOWNLOAD_WEBHOOK_URL; // 例: https://<ngrok>/hook
   if (!hook) return;
@@ -192,7 +152,64 @@ async function notifyDownloadAgent({ url, filename, category }) {
   }
 }
 
-/* ===== 回報流程 ===== */
+/* ====== 危險區判斷（不改資料庫版本）====== */
+/**
+ * 只用 DB 做外接矩形粗篩，再在 Node 端對每筆做 haversine 距離（半徑預設 500m）
+ * 回傳：true/false；若 DB 查詢失敗回傳 null（上層會走 fallback）
+ */
+async function isInDangerByDB(lat, lng, radiusMeters = 500) {
+  const { dLat, dLng } = metersToLatLngDelta(lat, radiusMeters);
+  const latMin = lat - dLat;
+  const latMax = lat + dLat;
+  const lngMin = lng - dLng;
+  const lngMax = lng + dLng;
+
+  const sql = `
+    SELECT latitude, longitude
+    FROM wasp_reports
+    WHERE latitude  IS NOT NULL
+      AND longitude IS NOT NULL
+      AND latitude  BETWEEN ? AND ?
+      AND longitude BETWEEN ? AND ?
+    LIMIT 5000
+  `;
+
+  try {
+    console.log(
+      `[DANGER-DB] bbox lat:[${latMin.toFixed(6)}, ${latMax.toFixed(
+        6
+      )}] lng:[${lngMin.toFixed(6)}, ${lngMax.toFixed(6)}]`
+    );
+    const t0 = Date.now();
+    const [rows] = await pool.query(sql, [latMin, latMax, lngMin, lngMax]);
+    console.log(
+      `[DANGER-DB] got ${rows.length} candidates in ${Date.now() - t0}ms`
+    );
+
+    const here = { lat, lng };
+    for (const r of rows) {
+      const p = {
+        lat: Number(r.latitude),
+        lng: Number(r.longitude),
+      };
+      if (Number.isNaN(p.lat) || Number.isNaN(p.lng)) continue;
+      const d = haversine(p, here);
+      if (d <= radiusMeters) {
+        console.log(
+          `[DANGER-DB] HIT distance=${Math.round(d)}m point=(${p.lat},${p.lng})`
+        );
+        return true;
+      }
+    }
+    console.log("[DANGER-DB] NO hit within radius");
+    return false;
+  } catch (e) {
+    console.error("[DANGER-DB] query failed:", e.message);
+    return null; // 交給上層 fallback
+  }
+}
+
+/* ====== 回報流程 ====== */
 async function startReport(event, category) {
   const userId = event.source?.userId;
   if (!userId) {
@@ -242,9 +259,9 @@ async function startReport(event, category) {
   });
 }
 
-/* 組 info.txt 的字串（含標籤與時間） */
+/* 建立 info.txt 內容（含台灣時區 date/time） */
 function buildInfoTxt({ displayName, lat, lng, notes }) {
-  const { date, time } = nowTWParts(); // 以台灣時區生出日期與時間
+  const { date, time } = nowTWParts();
   const lines = [
     `name: ${displayName || ""}`,
     `latitude: ${lat != null ? String(lat) : ""}`,
@@ -255,12 +272,12 @@ function buildInfoTxt({ displayName, lat, lng, notes }) {
   ];
   return lines.join("\n");
 }
-
 async function writeInfoTxt(reportDir, data) {
   const txt = buildInfoTxt(data);
   fs.writeFileSync(path.join(reportDir, "info.txt"), txt, "utf8");
 }
 
+/* 嘗試在三要件齊全時收尾（寫 info.txt、壓 ZIP、通知下載器） */
 async function finishIfReady(userId, replyToken) {
   const st = pendingReports.get(userId);
   if (!st) return false;
@@ -281,20 +298,19 @@ async function finishIfReady(userId, replyToken) {
         category: st.category,
       });
     } catch (e) {
-      console.error("壓縮/寫檔/通知失敗：", e);
+      console.error("❌ finalize failed (write/zip/notify):", e);
     }
 
     const text = `📦 已完成存檔。`;
     if (replyToken)
       await client.replyMessage(replyToken, { type: "text", text });
     else await client.pushMessage(userId, { type: "text", text });
-
     return true;
   }
   return false;
 }
 
-/* ===== webhook（不要在前面掛 JSON 解析）===== */
+/* ====== webhook（不要在前面掛 JSON 解析）====== */
 app.post("/webhook", line.middleware(config), async (req, res) => {
   try {
     const events = req.body.events || [];
@@ -304,11 +320,9 @@ app.post("/webhook", line.middleware(config), async (req, res) => {
         const userId = event.source?.userId;
         const msg = event.message;
 
-        // 文字（開/關追蹤、啟動回報、備註）
         if (msg.type === "text") {
           const text = (msg.text || "").trim();
 
-          // 開/關追蹤
           if (text === "開啟追蹤") {
             if (!pushableUsers.has(userId)) {
               pushableUsers.set(userId, 0);
@@ -359,7 +373,6 @@ app.post("/webhook", line.middleware(config), async (req, res) => {
           continue; // 其他文字不回覆
         }
 
-        // 圖片：回報期間存 image.jpg
         if (msg.type === "image") {
           const st = pendingReports.get(userId);
           if (!st) continue;
@@ -393,10 +406,13 @@ app.post("/webhook", line.middleware(config), async (req, res) => {
           continue;
         }
 
-        // 位置：回報期間只記錄（危險判斷在 /location）
         if (msg.type === "location") {
+          // 注意：這裡現在只做「回報流程」的資料記錄，不做危險提示
+          // 如果你之後想讓「聊天室位置訊息」也觸發危險提示，
+          // 請把 /location 的危險判斷那段複製到這裡。
           const st = pendingReports.get(userId);
           if (!st) continue;
+
           try {
             st.lat = Number(msg.latitude);
             st.lng = Number(msg.longitude);
@@ -429,28 +445,33 @@ app.post("/webhook", line.middleware(config), async (req, res) => {
   }
 });
 
-/* ===== LIFF 的 /location：只在這條掛 JSON；包含危險判斷＋回報整合 ===== */
+/* ====== LIFF 的 /location：只在這條掛 JSON；這裡才做危險判斷 ====== */
 app.post("/location", bodyParser.json(), async (req, res) => {
   const { userId, latitude, longitude } = req.body;
   if (!userId || !latitude || !longitude) {
+    console.warn("❌ /location 缺少欄位：", req.body);
     return res.status(400).send("Missing fields");
   }
 
   const lat = Number(latitude);
   const lng = Number(longitude);
-  const userLoc = { lat, lng };
+  console.log(`[DANGER-CHECK] input lat=${lat}, lng=${lng}`);
 
-  // 1) DB 動態查詢是否 500m 內有資料；若 DB 出錯→ fallback
+  // 1) 用 DB 外接矩形粗篩 + Node haversine 精算
+  const t0 = Date.now();
   let danger = await isInDangerByDB(lat, lng, 500);
+  console.log(
+    `[DANGER-CHECK] result=${danger} cost=${Date.now() - t0}ms (null 表示 DB 失敗、走 fallback)`
+  );
+
+  // 2) DB 失敗就 fallback 到單一危險點（避免完全沒提示）
   if (danger === null) {
-    const d = haversine(userLoc, {
-      lat: fallbackZone.lat,
-      lng: fallbackZone.lng,
-    });
+    const d = haversine({ lat, lng }, { lat: fallbackZone.lat, lng: fallbackZone.lng });
     danger = d <= fallbackZone.radius;
+    console.log(`[DANGER-FALLBACK] dist=${Math.round(d)}m => danger=${danger}`);
   }
 
-  // 2) 命中才推播（沿用 15 秒冷卻）
+  // 3) 命中才推播（沿用 15 秒冷卻 + 必須先「開啟追蹤」）
   if (danger && pushableUsers.has(userId)) {
     const now = Date.now();
     const last = pushableUsers.get(userId) || 0;
@@ -463,14 +484,14 @@ app.post("/location", bodyParser.json(), async (req, res) => {
         pushableUsers.set(userId, now);
         console.log("✅ 推播成功");
       } catch (err) {
-        console.error("❌ 推播失敗：", err.originalError?.response?.data || err);
+        console.error("❌ 推播失敗：", err.originalError?.response?.data || err.message);
       }
     } else {
       console.log("⏱️ 冷卻中，暫不重複通知");
     }
   }
 
-  // 3) 回報模式：記錄 lat/lng，嘗試完成
+  // 4) 回報模式：記錄 lat/lng，嘗試完成
   const st = pendingReports.get(userId);
   if (st) {
     try {
@@ -493,12 +514,9 @@ app.post("/location", bodyParser.json(), async (req, res) => {
             filename: `${st.folderName}.zip`,
             category: st.category,
           });
-          await client.pushMessage(userId, {
-            type: "text",
-            text: `📦 已完成存檔。`,
-          });
+          await client.pushMessage(userId, { type: "text", text: `📦 已完成存檔。` });
         } catch (e) {
-          console.error("壓縮/寫檔/通知失敗（/location 完成）：", e);
+          console.error("❌ 壓縮/寫檔/通知失敗（/location 完成）：", e);
           await client.pushMessage(userId, {
             type: "text",
             text: "📦 已完成存檔，但 ZIP 生成失敗，可稍後再試。",
@@ -518,7 +536,7 @@ app.post("/location", bodyParser.json(), async (req, res) => {
   res.sendStatus(200);
 });
 
-/* 啟動 */
+/* ====== 啟動 ====== */
 const PORT = process.env.PORT || 10000;
 app.listen(PORT, () => {
   console.log(`✅ Server running on port ${PORT}`);
@@ -526,3 +544,12 @@ app.listen(PORT, () => {
   if (base) console.log(`🔗 ZIP 下載根：${base}/reports/<檔名>.zip`);
   else console.log("ℹ️ 建議設定 PUBLIC_BASE_URL 或使用 RENDER_EXTERNAL_URL。");
 });
+
+/* ====== 全域錯誤保險（避免吞錯）====== */
+process.on("unhandledRejection", (e) => {
+  console.error("UNHANDLED REJECTION:", e);
+});
+process.on("uncaughtException", (e) => {
+  console.error("UNCAUGHT EXCEPTION:", e);
+});
+
