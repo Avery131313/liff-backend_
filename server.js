@@ -1,4 +1,4 @@
-// server.js — 動態 DB 查詢版（ST_Distance_Sphere 500m）＋ 回報 report.txt（name/lat/lng/date/notes）
+// server.js — 動態 DB（全歷史）500m 判斷 + 單一 info.txt（含 time）+ ZIP + 後台下載 + 本機下載器通知
 const express = require("express");
 const cors = require("cors");
 const bodyParser = require("body-parser");
@@ -13,7 +13,7 @@ const mysql = require("mysql2/promise");
 
 const app = express();
 
-/* CORS（不要在 webhook 前掛全域 JSON） */
+/* CORS（不要在 webhook 前掛全域 JSON 解析） */
 app.use(
   cors({
     origin: "*",
@@ -58,33 +58,55 @@ const pool = mysql.createPool({
     : {}),
 });
 
-/* === 危險區判斷（動態 DB 查詢，半徑固定 500m） ===
-   利用 MySQL 8 的 ST_Distance_Sphere，
-   表要有 latitude/longitude 值（可加 SPATIAL INDEX 提升速度）。
-   這裡只做「是否命中」→ 有 1 筆就算危險。 */
+/* ===== 地理工具 ===== */
+function metersToLatLngDelta(latDeg, radiusMeters) {
+  const dLat = radiusMeters / 111320; // 1度緯度 ≈ 111,320m
+  const rad = (Math.PI / 180) * latDeg;
+  const metersPerDegLon = 111320 * Math.cos(rad || 1e-6);
+  const dLng = radiusMeters / metersPerDegLon;
+  return { dLat, dLng };
+}
+
+/* === 危險區判斷（動態 DB 查詢，全歷史，半徑 500m） === */
 async function isInDangerByDB(lat, lng, radiusMeters = 500) {
+  const { dLat, dLng } = metersToLatLngDelta(lat, radiusMeters);
+
+  const latMin = lat - dLat;
+  const latMax = lat + dLat;
+  const lngMin = lng - dLng;
+  const lngMax = lng + dLng;
+
+  // 先用 bounding box 粗篩，再用 ST_Distance_Sphere 精算
+  // 注意 POINT 的順序是 (longitude, latitude)
+  const sql = `
+    SELECT 1
+    FROM wasp_reports
+    WHERE latitude  IS NOT NULL
+      AND longitude IS NOT NULL
+      AND latitude  BETWEEN ? AND ?
+      AND longitude BETWEEN ? AND ?
+      AND ST_Distance_Sphere(
+            POINT(longitude, latitude),
+            POINT(?, ?)
+          ) <= ?
+    LIMIT 1
+  `;
+
   try {
-    const sql = `
-      SELECT 1
-      FROM wasp_reports
-      WHERE latitude IS NOT NULL AND longitude IS NOT NULL
-        AND created_at >= NOW() - INTERVAL 14 DAY
-        AND ST_Distance_Sphere(
-              POINT(longitude, latitude),
-              POINT(?, ?)
-            ) <= ?
-      LIMIT 1
-    `;
-    // 注意 POINT(?, ?) 參數順序：POINT(lng, lat)
-    const [rows] = await pool.query(sql, [lng, lat, radiusMeters]);
+    const [rows] = await pool.query(sql, [
+      latMin, latMax,
+      lngMin, lngMax,
+      lng, lat,
+      radiusMeters,
+    ]);
     return rows.length > 0;
   } catch (e) {
     console.error("DB 危險區查詢失敗：", e.message);
-    return null; // 用 null 表示 DB 出問題，讓上層 fallback
+    return null; // 回上層用 fallback
   }
 }
 
-/* 小工具 */
+/* ===== 小工具 ===== */
 function ts() {
   const d = new Date();
   const p = (n) => String(n).padStart(2, "0");
@@ -100,19 +122,23 @@ function ensureDir(d) {
 function getBaseUrl() {
   return process.env.PUBLIC_BASE_URL || process.env.RENDER_EXTERNAL_URL || "";
 }
-function todayISO_TW() {
-  // 產生台灣時區 YYYY-MM-DD（避免 UTC 跨日）
+function nowTWParts() {
   const fmt = new Intl.DateTimeFormat("zh-TW", {
     timeZone: "Asia/Taipei",
     year: "numeric",
     month: "2-digit",
     day: "2-digit",
+    hour: "2-digit",
+    minute: "2-digit",
+    second: "2-digit",
+    hour12: false,
   });
   const parts = fmt.formatToParts(new Date());
-  const y = parts.find((p) => p.type === "year")?.value;
-  const m = parts.find((p) => p.type === "month")?.value;
-  const d = parts.find((p) => p.type === "day")?.value;
-  return `${y}-${m}-${d}`;
+  const get = (t) => parts.find((p) => p.type === t)?.value;
+  return {
+    date: `${get("year")}-${get("month")}-${get("day")}`, // YYYY-MM-DD
+    time: `${get("hour")}:${get("minute")}:${get("second")}`, // HH:mm:ss
+  };
 }
 
 /* 壓 ZIP 並回傳公開下載連結 */
@@ -212,24 +238,27 @@ async function startReport(event, category) {
   await client.replyMessage(event.replyToken, {
     type: "text",
     text:
-      "已建立回報，請依序上傳：1.照片2.備註：直接輸入文字訊息即可（例如：在學校門口發現）3.位置",
+      "已建立回報，請依序上傳：\n1) 照片\n2) 位置（LINE 位置訊息或 LIFF）\n3) 備註：直接輸入文字訊息即可（例如：在學校門口發現）",
   });
 }
 
-function buildReportTxt({ displayName, lat, lng, notes }) {
+/* 組 info.txt 的字串（含標籤與時間） */
+function buildInfoTxt({ displayName, lat, lng, notes }) {
+  const { date, time } = nowTWParts(); // 以台灣時區生出日期與時間
   const lines = [
-    displayName || "", // name
-    lat != null ? String(lat) : "", // latitude
-    lng != null ? String(lng) : "", // longitude
-    todayISO_TW(), // date (台灣時區)
-    (notes || "").trim(), // notes
+    `name: ${displayName || ""}`,
+    `latitude: ${lat != null ? String(lat) : ""}`,
+    `longitude: ${lng != null ? String(lng) : ""}`,
+    `date: ${date}`,
+    `time: ${time}`,
+    `notes: ${(notes || "").trim()}`,
   ];
   return lines.join("\n");
 }
 
-async function writeReportTxt(reportDir, data) {
-  const txt = buildReportTxt(data);
-  fs.writeFileSync(path.join(reportDir, "report.txt"), txt, "utf8");
+async function writeInfoTxt(reportDir, data) {
+  const txt = buildInfoTxt(data);
+  fs.writeFileSync(path.join(reportDir, "info.txt"), txt, "utf8");
 }
 
 async function finishIfReady(userId, replyToken) {
@@ -239,7 +268,7 @@ async function finishIfReady(userId, replyToken) {
   if (st.hasPhoto && st.hasLocation && st.hasNotes) {
     pendingReports.delete(userId);
     try {
-      await writeReportTxt(st.reportDir, {
+      await writeInfoTxt(st.reportDir, {
         displayName: st.displayName,
         lat: st.lat,
         lng: st.lng,
@@ -285,7 +314,7 @@ app.post("/webhook", line.middleware(config), async (req, res) => {
               pushableUsers.set(userId, 0);
               await client.replyMessage(event.replyToken, {
                 type: "text",
-                text: "✅ 你已成功啟用追蹤通知，請打開連結開始定位。",
+                text: "✅ 你已成功啟用追蹤通知，請打開 LIFF 畫面開始定位。",
               });
             } else {
               await client.replyMessage(event.replyToken, {
@@ -321,7 +350,7 @@ app.post("/webhook", line.middleware(config), async (req, res) => {
             if (!done) {
               await client.replyMessage(event.replyToken, {
                 type: "text",
-                text: "📝 備註已記錄，請繼續提供位置。",
+                text: "📝 備註已記錄，請繼續提供照片與位置（若尚未提供）。",
               });
             }
             continue;
@@ -351,7 +380,7 @@ app.post("/webhook", line.middleware(config), async (req, res) => {
             if (!done) {
               await client.replyMessage(event.replyToken, {
                 type: "text",
-                text: "✅ 照片已儲存，請再分享備註與定位。",
+                text: "✅ 照片已儲存，請再分享定位與備註（若尚未提供）。",
               });
             }
           } catch (err) {
@@ -364,7 +393,7 @@ app.post("/webhook", line.middleware(config), async (req, res) => {
           continue;
         }
 
-        // 位置：回報期間只記錄，不做危險判斷（危險判斷在 /location）
+        // 位置：回報期間只記錄（危險判斷在 /location）
         if (msg.type === "location") {
           const st = pendingReports.get(userId);
           if (!st) continue;
@@ -377,7 +406,7 @@ app.post("/webhook", line.middleware(config), async (req, res) => {
             if (!done) {
               await client.replyMessage(event.replyToken, {
                 type: "text",
-                text: "✅ 已收到定位。",
+                text: "✅ 已收到定位，請提供照片與備註（若尚未提供）。",
               });
             }
           } catch (err) {
@@ -429,7 +458,7 @@ app.post("/location", bodyParser.json(), async (req, res) => {
       try {
         await client.pushMessage(userId, {
           type: "text",
-          text: `⚠️ 警告：您已進入危險區域，請注意安全！`,
+          text: `⚠️ 警告：您已進入危險區域（500 公尺內），請注意安全！`,
         });
         pushableUsers.set(userId, now);
         console.log("✅ 推播成功");
@@ -452,7 +481,7 @@ app.post("/location", bodyParser.json(), async (req, res) => {
       if (st.hasPhoto && st.hasLocation && st.hasNotes) {
         pendingReports.delete(userId);
         try {
-          await writeReportTxt(st.reportDir, {
+          await writeInfoTxt(st.reportDir, {
             displayName: st.displayName,
             lat: st.lat,
             lng: st.lng,
