@@ -343,7 +343,7 @@ app.post("/webhook", line.middleware(config), async (req, res) => {
           }
 
           // 啟動回報
-          if (text === "發現疑似蜜蜂" || text === "發現疑似蜂巢") {
+          if (text === "發現疑似虎頭蜂" || text === "發現疑似蜂巢") {
             const category = text.includes("蜜蜂") ? "疑似蜜蜂" : "疑似蜂巢";
             await startReport(event, category);
             continue;
